@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   correo:
-    image: correo
+    image: guilhermepachecod/correo:latest
     container_name: correo
     restart: on-failure:5
     ports:
