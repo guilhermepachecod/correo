@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  correo:
+    image: correo
+    container_name: correo
+    restart: on-failure:5
+    ports:
+      - "15002:15002"
+    volumes:
+      - ./database:/app/database
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:15002/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
