@@ -101,6 +101,20 @@ class MailService:
         conn.login(account.username, account.get_password())
         return conn
 
+    def _find_spam_folder(self, account: Account):
+        folders = self.get_folders(account)
+        for f in folders:
+            if any(k in f.lower() for k in ['spam', 'junk']):
+                return f
+        return None
+
+    def _find_inbox_folder(self, account: Account):
+        folders = self.get_folders(account)
+        for f in folders:
+            if f.upper() == 'INBOX':
+                return f
+        return 'INBOX'
+
     def test_connection(self, account: Account):
         errors = []
         try:
@@ -119,9 +133,7 @@ class MailService:
             s.quit()
         except Exception as e:
             errors.append(f'SMTP: {e}')
-        if errors:
-            return {'ok': False, 'errors': errors}
-        return {'ok': True}
+        return {'ok': not errors, 'errors': errors}
 
     def get_folders(self, account: Account):
         try:
@@ -132,7 +144,6 @@ class MailService:
             for item in folder_list:
                 if isinstance(item, bytes):
                     decoded = item.decode('utf-8', errors='replace')
-                    # Suporta separadores "." e "/" (ex: "." INBOX.Sent ou "/" INBOX/Sent)
                     match = re.search(r'\(.*?\)\s+"?[./]"?\s+(.*)', decoded)
                     if match:
                         name = match.group(1).strip().strip('"')
@@ -166,12 +177,10 @@ class MailService:
         folders = self.get_folders(account)
         priority_keywords = ['inbox', 'sent', 'drafts', 'junk', 'spam', 'trash', 'archive']
         result = []
-        # Prioridade: pastas que contêm keywords
         for keyword in priority_keywords:
             for f in folders:
                 if keyword in f.lower() and f not in result:
                     result.append(f)
-        # Resto
         for f in folders:
             if f not in result:
                 result.append(f)
@@ -244,35 +253,22 @@ class MailService:
                     att_data = _get_attachments(msg)
 
                     email_obj = Email(
-                        account_id=account.id,
-                        folder=folder,
-                        uid=uid,
-                        message_id=message_id,
-                        in_reply_to=in_reply_to,
+                        account_id=account.id, folder=folder, uid=uid,
+                        message_id=message_id, in_reply_to=in_reply_to,
                         subject=subject or '(sem assunto)',
-                        from_addr=from_addr,
-                        from_name=from_name,
-                        to_addr=to_addr,
-                        cc_addr=cc_addr,
-                        reply_to=reply_to,
-                        date=date,
-                        body_text=body_text,
-                        body_html=body_html,
-                        is_read=is_read,
-                        has_attachments=len(att_data) > 0,
+                        from_addr=from_addr, from_name=from_name,
+                        to_addr=to_addr, cc_addr=cc_addr, reply_to=reply_to,
+                        date=date, body_text=body_text, body_html=body_html,
+                        is_read=is_read, has_attachments=len(att_data) > 0,
                     )
                     _db.session.add(email_obj)
                     _db.session.flush()
 
                     for a in att_data:
-                        att = Attachment(
-                            email_id=email_obj.id,
-                            filename=a['filename'],
-                            content_type=a['content_type'],
-                            size=a['size'],
-                            data=a['data'],
-                        )
-                        _db.session.add(att)
+                        _db.session.add(Attachment(
+                            email_id=email_obj.id, filename=a['filename'],
+                            content_type=a['content_type'], size=a['size'], data=a['data'],
+                        ))
 
                     _db.session.commit()
                     self._emit('new_email', {
@@ -291,18 +287,55 @@ class MailService:
 
     def mark_read_on_server(self, email_obj: Email):
         try:
-            account = email_obj.account
-            conn = self._imap_connect(account)
+            conn = self._imap_connect(email_obj.account)
             conn.select(f'"{email_obj.folder}"')
             conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Seen')
             conn.logout()
         except Exception as e:
             log.warning(f'mark_read_on_server error: {e}')
 
-    def delete_email(self, email_obj: Email):
+    def mark_unread_on_server(self, email_obj: Email):
+        try:
+            conn = self._imap_connect(email_obj.account)
+            conn.select(f'"{email_obj.folder}"')
+            conn.uid('store', str(email_obj.uid), '-FLAGS', '\\Seen')
+            conn.logout()
+        except Exception as e:
+            log.warning(f'mark_unread_on_server error: {e}')
+
+    def set_spam(self, email_obj: Email, mark_as_spam: bool):
+        """Move para spam ou devolve para INBOX."""
+        from database import db as _db
         try:
             account = email_obj.account
+            if mark_as_spam:
+                target = self._find_spam_folder(account)
+                if not target:
+                    log.warning('Pasta de spam não encontrada')
+                    return False
+            else:
+                target = self._find_inbox_folder(account)
+
+            if email_obj.folder.lower() == target.lower():
+                return True  # já está na pasta certa
+
             conn = self._imap_connect(account)
+            conn.select(f'"{email_obj.folder}"')
+            conn.uid('copy', str(email_obj.uid), f'"{target}"')
+            conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Deleted')
+            conn.expunge()
+            conn.logout()
+
+            email_obj.folder = target
+            _db.session.commit()
+            return True
+        except Exception as e:
+            log.warning(f'set_spam error: {e}')
+            return False
+
+    def delete_email(self, email_obj: Email):
+        try:
+            conn = self._imap_connect(email_obj.account)
             conn.select(f'"{email_obj.folder}"')
             conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Deleted')
             conn.expunge()
@@ -311,16 +344,15 @@ class MailService:
             log.warning(f'delete_email error: {e}')
 
     def move_email(self, email_obj: Email, target_folder: str):
+        from database import db as _db
         try:
-            account = email_obj.account
-            conn = self._imap_connect(account)
+            conn = self._imap_connect(email_obj.account)
             conn.select(f'"{email_obj.folder}"')
             conn.uid('copy', str(email_obj.uid), f'"{target_folder}"')
             conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Deleted')
             conn.expunge()
             conn.logout()
             email_obj.folder = target_folder
-            from database import db as _db
             _db.session.commit()
         except Exception as e:
             log.warning(f'move_email error: {e}')
@@ -328,7 +360,7 @@ class MailService:
     def send_email(self, account: Account, to: str, cc: str, bcc: str,
                    subject: str, body: str, reply_to_id=None, attachments=None):
         try:
-            msg = MIMEMultipart('alternative' if not attachments else 'mixed')
+            msg = MIMEMultipart('mixed')
             msg['From'] = f'{account.name} <{account.email}>'
             msg['To'] = to
             if cc:
@@ -336,14 +368,12 @@ class MailService:
             msg['Subject'] = subject
 
             if reply_to_id:
-                from database import db as _db
                 orig = Email.query.get(reply_to_id)
                 if orig and orig.message_id:
                     msg['In-Reply-To'] = orig.message_id
                     msg['References'] = orig.message_id
 
-            text_part = MIMEText(body, 'plain', 'utf-8')
-            msg.attach(text_part)
+            msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
             if attachments:
                 for f in attachments:
@@ -372,7 +402,6 @@ class MailService:
             s.sendmail(account.email, recipients, msg.as_string())
             s.quit()
 
-            # Salva na pasta Sent via IMAP
             try:
                 conn = self._imap_connect(account)
                 folders = self.get_folders(account)

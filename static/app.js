@@ -10,7 +10,8 @@ const state = {
   searchQuery: '',
   replyToId: null,
   editAccountId: null,
-  attachments: [], // files for compose
+  attachments: [],
+  selectedIds: new Set(),
 };
 
 // ── Socket.IO ──────────────────────────────────────────────────────────────────
@@ -66,6 +67,7 @@ function onAccountChange() {
   state.selectedFolder = 'INBOX';
   state.selectedEmailId = null;
   state.currentPage = 1;
+  state.selectedIds.clear();
   loadEmails();
   updateFolderCounts();
   renderFolders();
@@ -74,7 +76,7 @@ function onAccountChange() {
 
 // ── Folders ────────────────────────────────────────────────────────────────────
 const FOLDER_ICONS = {
-  inbox: '📥', sent: '📤', drafts: '📝', trash: '🗑', junk: '🚫', spam: '🚫', starred: '⭐',
+  inbox: '📥', sent: '📤', drafts: '📝', trash: '🗑', junk: '🚫', spam: '🚫', starred: '⭐', archive: '📦',
 };
 function folderIcon(name) {
   const key = name.toLowerCase();
@@ -96,11 +98,9 @@ const COMMON_FOLDERS = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Spam'];
 async function renderFolders() {
   const container = document.getElementById('folders');
   let folders = [...COMMON_FOLDERS];
-
   for (const f of Object.keys(folderCounts)) {
     if (!folders.includes(f)) folders.push(f);
   }
-
   container.innerHTML = '';
   for (const f of folders) {
     const counts = folderCounts[f] || { total: 0, unread: 0 };
@@ -121,9 +121,11 @@ function selectFolder(folder) {
   state.selectedFolder = folder;
   state.currentPage = 1;
   state.selectedEmailId = null;
+  state.selectedIds.clear();
   hideEmail();
   loadEmails();
   renderFolders();
+  renderBulkBar();
 }
 
 // ── Email list ─────────────────────────────────────────────────────────────────
@@ -133,11 +135,7 @@ async function loadEmails() {
   loading.style.display = 'flex';
   empty.style.display = 'none';
 
-  const params = new URLSearchParams({
-    folder: state.selectedFolder,
-    page: state.currentPage,
-    per_page: 50,
-  });
+  const params = new URLSearchParams({ folder: state.selectedFolder, page: state.currentPage, per_page: 50 });
   if (state.selectedAccountId) params.set('account_id', state.selectedAccountId);
   if (state.searchQuery) params.set('search', state.searchQuery);
 
@@ -159,18 +157,17 @@ function renderEmailList() {
   const empty = document.getElementById('list-empty');
   container.querySelectorAll('.email-item').forEach(e => e.remove());
 
-  if (state.emails.length === 0) {
-    empty.style.display = 'flex';
-    return;
-  }
+  if (state.emails.length === 0) { empty.style.display = 'flex'; return; }
   empty.style.display = 'none';
 
   for (const email of state.emails) {
     const item = document.createElement('div');
-    item.className = 'email-item' + (email.is_read ? '' : ' unread') + (email.id === state.selectedEmailId ? ' active' : '');
+    const isSelected = state.selectedIds.has(email.id);
+    item.className = 'email-item' + (email.is_read ? '' : ' unread') + (email.id === state.selectedEmailId ? ' active' : '') + (isSelected ? ' selected' : '');
     item.dataset.id = email.id;
     item.innerHTML = `
       <div class="ei-row1">
+        <input type="checkbox" class="ei-checkbox" ${isSelected ? 'checked' : ''} onclick="toggleSelect(event, ${email.id})">
         <span class="ei-from">${esc(email.from_name || email.from_addr)}</span>
         <span class="ei-date">${fmtDate(email.date)}</span>
         <div class="ei-indicators">
@@ -182,8 +179,94 @@ function renderEmailList() {
       <div class="ei-subject">${esc(email.subject)}</div>
       <div class="ei-preview">${esc(email.preview)}</div>
     `;
-    item.onclick = () => openEmail(email.id);
+    item.onclick = (e) => {
+      if (e.target.classList.contains('ei-checkbox')) return;
+      openEmail(email.id);
+    };
     container.appendChild(item);
+  }
+  renderBulkBar();
+}
+
+// ── Selection ──────────────────────────────────────────────────────────────────
+function toggleSelect(e, id) {
+  e.stopPropagation();
+  if (state.selectedIds.has(id)) {
+    state.selectedIds.delete(id);
+  } else {
+    state.selectedIds.add(id);
+  }
+  const item = document.querySelector(`.email-item[data-id="${id}"]`);
+  if (item) item.classList.toggle('selected', state.selectedIds.has(id));
+  renderBulkBar();
+}
+
+function selectAll() {
+  state.emails.forEach(e => state.selectedIds.add(e.id));
+  renderEmailList();
+}
+
+function deselectAll() {
+  state.selectedIds.clear();
+  renderEmailList();
+}
+
+function renderBulkBar() {
+  const bar = document.getElementById('bulk-bar');
+  const count = state.selectedIds.size;
+  if (count === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  document.getElementById('bulk-count').textContent = `${count} selecionado(s)`;
+}
+
+// ── Bulk actions ───────────────────────────────────────────────────────────────
+async function bulkAction(action) {
+  const ids = state.selectedIds.size > 0 ? [...state.selectedIds] : [];
+  if (ids.length === 0) return;
+
+  const labels = {
+    delete: 'Excluir', mark_spam: 'Marcar como spam',
+    mark_read: 'Marcar como lido', mark_unread: 'Marcar como não lido',
+    mark_not_spam: 'Desmarcar spam',
+  };
+  if (action === 'delete' || action === 'mark_spam') {
+    if (!confirm(`${labels[action]} ${ids.length} e-mail(s)?`)) return;
+  }
+
+  const res = await fetch('/api/emails/bulk', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    toast(`${labels[action]}: ${data.count} e-mail(s)`, 'success');
+    state.selectedIds.clear();
+    await loadEmails();
+    updateFolderCounts();
+    if (['delete', 'mark_spam'].includes(action) && state.selectedEmailId && ids.includes(state.selectedEmailId)) {
+      hideEmail();
+      state.selectedEmailId = null;
+    }
+  } else {
+    toast('Erro na operação', 'error');
+  }
+}
+
+async function bulkActionAll(action) {
+  const labels = { mark_read: 'Marcar todos como lido', delete: 'Excluir todos' };
+  if (!confirm(`${labels[action]} na pasta "${state.selectedFolder}"?`)) return;
+  const res = await fetch('/api/emails/bulk', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ action, ids: [], folder: state.selectedFolder, account_id: state.selectedAccountId }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    toast(`${data.count} e-mail(s) processados`, 'success');
+    await loadEmails();
+    updateFolderCounts();
+    if (action === 'delete') { hideEmail(); state.selectedEmailId = null; }
   }
 }
 
@@ -212,19 +295,28 @@ async function openEmail(id) {
   document.getElementById('ev-to-line').textContent = email.to_addr ? `Para: ${email.to_addr}` : '';
   document.getElementById('ev-date').textContent = fmtDateFull(email.date);
 
+  // Star
   const starBtn = document.getElementById('ev-star-btn');
   starBtn.textContent = email.is_starred ? '★ Marcado' : '☆ Marcar';
   starBtn.style.color = email.is_starred ? 'var(--amber)' : '';
   starBtn._emailId = id;
-  starBtn._starred = email.is_starred;
 
+  // Spam button label
+  const isSpam = ['spam', 'junk'].some(k => email.folder?.toLowerCase().includes(k));
+  const spamBtn = document.getElementById('ev-spam-btn');
+  spamBtn.textContent = isSpam ? '✓ Não é spam' : '⚠ Spam';
+  spamBtn.dataset.isSpam = isSpam ? '1' : '0';
+
+  // Unread button
+  document.getElementById('ev-unread-btn').textContent = '✉ Não lido';
+
+  // Attachments
   const attDiv = document.getElementById('ev-attachments');
   if (email.attachments && email.attachments.length > 0) {
     attDiv.style.display = 'flex';
     attDiv.innerHTML = email.attachments.map(a =>
       `<a class="att-chip" href="/api/attachments/${a.id}" target="_blank">
-        <span class="att-icon">📎</span>
-        <span>${esc(a.filename)}</span>
+        <span class="att-icon">📎</span><span>${esc(a.filename)}</span>
         <span class="att-size">${fmtSize(a.size)}</span>
        </a>`
     ).join('');
@@ -233,13 +325,13 @@ async function openEmail(id) {
     attDiv.innerHTML = '';
   }
 
+  // Body
   const bodyHtml = document.getElementById('ev-body-html');
   const bodyText = document.getElementById('ev-body-text');
   if (email.body_html) {
     bodyHtml.style.display = 'block';
     bodyText.style.display = 'none';
-    const clean = email.body_html.replace(/<script[\s\S]*?<\/script>/gi, '')
-                                  .replace(/on\w+="[^"]*"/gi, '');
+    const clean = email.body_html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/on\w+="[^"]*"/gi, '');
     bodyHtml.innerHTML = clean;
   } else {
     bodyHtml.style.display = 'none';
@@ -256,16 +348,49 @@ function hideEmail() {
 }
 
 async function toggleStar() {
-  const btn = document.getElementById('ev-star-btn');
-  const id = btn._emailId || state.selectedEmailId;
+  const id = state.selectedEmailId;
   if (!id) return;
   const res = await fetch(`/api/emails/${id}/star`, { method: 'POST' });
   const data = await res.json();
-  btn._starred = data.starred;
+  const btn = document.getElementById('ev-star-btn');
   btn.textContent = data.starred ? '★ Marcado' : '☆ Marcar';
   btn.style.color = data.starred ? 'var(--amber)' : '';
   const listEmail = state.emails.find(e => e.id === id);
   if (listEmail) { listEmail.is_starred = data.starred; renderEmailList(); }
+}
+
+async function markUnread() {
+  const id = state.selectedEmailId;
+  if (!id) return;
+  await fetch(`/api/emails/${id}/read`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({read: false}) });
+  const listEmail = state.emails.find(e => e.id === id);
+  if (listEmail) { listEmail.is_read = false; renderEmailList(); }
+  hideEmail();
+  state.selectedEmailId = null;
+  toast('Marcado como não lido', 'success');
+}
+
+async function toggleSpam() {
+  const id = state.selectedEmailId;
+  if (!id) return;
+  const btn = document.getElementById('ev-spam-btn');
+  const isSpam = btn.dataset.isSpam === '1';
+  const res = await fetch(`/api/emails/${id}/spam`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ spam: !isSpam }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    toast(isSpam ? 'Removido do spam' : 'Marcado como spam', 'success');
+    state.emails = state.emails.filter(e => e.id !== id);
+    state.selectedEmailId = null;
+    hideEmail();
+    renderEmailList();
+    updateFolderCounts();
+  } else {
+    toast('Erro ao mover e-mail', 'error');
+  }
 }
 
 async function deleteEmail() {
@@ -280,7 +405,7 @@ async function deleteEmail() {
   toast('E-mail excluído', 'success');
 }
 
-// ── Compose ────────────────────────────────────────────────────────────────────
+// ── Compose / Reply / Forward ──────────────────────────────────────────────────
 function openCompose(opts = {}) {
   state.replyToId = opts.replyToId || null;
   state.attachments = [];
@@ -300,27 +425,89 @@ function closeCompose() {
   state.attachments = [];
 }
 
-function replyEmail() {
-  const view = document.getElementById('email-view');
-  const email = view._email;
-  if (!email) return;
-  const replyTo = email.reply_to || email.from_addr;
-  const subject = email.subject.startsWith('Re:') ? email.subject : `Re: ${email.subject}`;
-  const quote = `\n\n--- Mensagem original ---\nDe: ${email.from_addr}\nData: ${fmtDateFull(email.date)}\n\n${email.body_text || ''}`;
-  openCompose({ to: replyTo, subject, body: quote, replyToId: email.id, title: 'Responder' });
+function _quoteBody(email) {
+  return `\n\n--- Mensagem original ---\nDe: ${email.from_addr}\nData: ${fmtDateFull(email.date)}\n\n${email.body_text || ''}`;
 }
 
+function replyEmail() {
+  const email = document.getElementById('email-view')._email;
+  if (!email) return;
+  const to = email.reply_to || email.from_addr;
+  const subject = email.subject.startsWith('Re:') ? email.subject : `Re: ${email.subject}`;
+  openCompose({ to, subject, body: _quoteBody(email), replyToId: email.id, title: 'Responder' });
+}
+
+function replyAll() {
+  const email = document.getElementById('email-view')._email;
+  if (!email) return;
+  const to = email.reply_to || email.from_addr;
+  const cc = [email.to_addr, email.cc_addr].filter(Boolean).join(', ');
+  const subject = email.subject.startsWith('Re:') ? email.subject : `Re: ${email.subject}`;
+  openCompose({ to, cc, subject, body: _quoteBody(email), replyToId: email.id, title: 'Responder a todos' });
+}
+
+function forwardEmail() {
+  const email = document.getElementById('email-view')._email;
+  if (!email) return;
+  const subject = email.subject.startsWith('Fwd:') ? email.subject : `Fwd: ${email.subject}`;
+  const body = `\n\n--- Mensagem encaminhada ---\nDe: ${email.from_addr}\nPara: ${email.to_addr}\nData: ${fmtDateFull(email.date)}\nAssunto: ${email.subject}\n\n${email.body_text || ''}`;
+  openCompose({ subject, body, title: 'Encaminhar' });
+}
+
+function forwardAsAttachment() {
+  const email = document.getElementById('email-view')._email;
+  if (!email) return;
+  const subject = `Fwd: ${email.subject}`;
+  const body = `E-mail encaminhado como anexo.\n\nOriginal de: ${email.from_addr}\nAssunto: ${email.subject}`;
+  openCompose({ subject, body, title: 'Encaminhar como anexo' });
+  toast('Compose aberto — anexe o .eml manualmente se necessário', 'info');
+}
+
+function editAsNew() {
+  const email = document.getElementById('email-view')._email;
+  if (!email) return;
+  openCompose({
+    to: email.to_addr,
+    cc: email.cc_addr,
+    subject: email.subject,
+    body: email.body_text || '',
+    title: 'Editar como nova mensagem',
+  });
+}
+
+function printEmail() {
+  const email = document.getElementById('email-view')._email;
+  if (!email) return;
+  const win = window.open('', '_blank');
+  const body = email.body_html
+    ? email.body_html.replace(/<script[\s\S]*?<\/script>/gi, '')
+    : `<pre style="font-family:sans-serif;white-space:pre-wrap">${esc(email.body_text || '')}</pre>`;
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <title>${esc(email.subject)}</title>
+    <style>body{font-family:sans-serif;max-width:800px;margin:20px auto;color:#111}
+    .header{border-bottom:1px solid #ccc;margin-bottom:16px;padding-bottom:12px}
+    h1{font-size:18px;margin:0 0 8px}.meta{font-size:13px;color:#555;margin:2px 0}
+    @media print{body{margin:0}}</style></head>
+    <body><div class="header">
+    <h1>${esc(email.subject)}</h1>
+    <div class="meta">De: ${esc(email.from_name || email.from_addr)} &lt;${esc(email.from_addr)}&gt;</div>
+    <div class="meta">Para: ${esc(email.to_addr)}</div>
+    <div class="meta">Data: ${fmtDateFull(email.date)}</div>
+    </div>${body}</body></html>`);
+  win.document.close();
+  win.focus();
+  setTimeout(() => win.print(), 400);
+}
+
+// ── Attachments ────────────────────────────────────────────────────────────────
 function addAttachments(input) {
-  for (const file of input.files) {
-    state.attachments.push(file);
-  }
+  for (const file of input.files) state.attachments.push(file);
   renderAttachList();
   input.value = '';
 }
 
 function renderAttachList() {
-  const list = document.getElementById('compose-attach-list');
-  list.innerHTML = state.attachments.map((f, i) =>
+  document.getElementById('compose-attach-list').innerHTML = state.attachments.map((f, i) =>
     `<span class="compose-att">${esc(f.name)} <span class="compose-att-remove" onclick="removeAtt(${i})">×</span></span>`
   ).join('');
 }
@@ -347,12 +534,8 @@ async function sendEmail() {
   try {
     const res = await fetch('/api/emails/send', { method: 'POST', body: fd });
     const data = await res.json();
-    if (data.ok) {
-      toast('E-mail enviado!', 'success');
-      closeCompose();
-    } else {
-      toast(`Erro: ${data.error}`, 'error');
-    }
+    if (data.ok) { toast('E-mail enviado!', 'success'); closeCompose(); }
+    else toast(`Erro: ${data.error}`, 'error');
   } catch (e) {
     toast('Erro ao enviar', 'error');
   } finally {
@@ -363,21 +546,19 @@ async function sendEmail() {
 
 // ── Sync ───────────────────────────────────────────────────────────────────────
 async function syncAll() {
-  const btn = document.getElementById('sync-btn');
-  btn.classList.add('spinning');
+  document.getElementById('sync-btn').classList.add('spinning');
   await fetch('/api/sync/all', { method: 'POST' });
-  setTimeout(() => btn.classList.remove('spinning'), 2000);
+  setTimeout(() => document.getElementById('sync-btn').classList.remove('spinning'), 2000);
 }
 
 async function syncCurrent() {
-  const btn = document.getElementById('sync-btn');
-  btn.classList.add('spinning');
+  document.getElementById('sync-btn').classList.add('spinning');
   if (state.selectedAccountId) {
     await fetch(`/api/accounts/${state.selectedAccountId}/sync`, { method: 'POST' });
   } else {
     await fetch('/api/sync/all', { method: 'POST' });
   }
-  setTimeout(() => btn.classList.remove('spinning'), 2000);
+  setTimeout(() => document.getElementById('sync-btn').classList.remove('spinning'), 2000);
 }
 
 // ── Sync .conf ─────────────────────────────────────────────────────────────────
@@ -392,11 +573,8 @@ async function syncConf() {
     if (data.created.length) parts.push(`${data.created.length} criada(s)`);
     if (data.updated.length) parts.push(`${data.updated.length} atualizada(s)`);
     if (data.deleted.length) parts.push(`${data.deleted.length} removida(s)`);
-    if (data.errors.length) {
-      toast(`Erros: ${data.errors.join(' | ')}`, 'error');
-    } else {
-      toast(parts.length ? parts.join(', ') : 'Nenhuma alteração', 'success');
-    }
+    if (data.errors.length) toast(`Erros: ${data.errors.join(' | ')}`, 'error');
+    else toast(parts.length ? parts.join(', ') : 'Nenhuma alteração', 'success');
     await loadAccounts();
   } catch (e) {
     toast('Erro ao sincronizar contas', 'error');
@@ -472,24 +650,17 @@ async function deleteAccount(id) {
   if (!confirm('Remover esta conta? Os e-mails serão mantidos.')) return;
   await fetch(`/api/accounts/${id}`, { method: 'DELETE' });
   await loadAccounts();
-  if (state.selectedAccountId === id) {
-    state.selectedAccountId = null;
-    document.getElementById('account-select').value = '';
-  }
+  if (state.selectedAccountId === id) { state.selectedAccountId = null; document.getElementById('account-select').value = ''; }
   loadEmails();
   toast('Conta removida', 'success');
 }
 
 async function purgeAccount(id) {
   const a = state.accounts.find(x => x.id === id);
-  if (!confirm(`Limpar "${a?.name}"? Isso removerá a conta E TODOS OS E-MAILS permanentemente.`)) return;
+  if (!confirm(`Limpar "${a?.name}"? Remove conta E TODOS OS E-MAILS permanentemente.`)) return;
   await fetch(`/api/accounts/${id}/purge`, { method: 'DELETE' });
   await loadAccounts();
-  if (state.selectedAccountId === id) {
-    state.selectedAccountId = null;
-    document.getElementById('account-select').value = '';
-    hideEmail();
-  }
+  if (state.selectedAccountId === id) { state.selectedAccountId = null; document.getElementById('account-select').value = ''; hideEmail(); }
   loadEmails();
   updateFolderCounts();
   toast('Conta e e-mails removidos', 'success');
@@ -518,9 +689,7 @@ async function saveAccount() {
     smtp_ssl: document.getElementById('af-smtp-ssl').checked,
     smtp_tls: document.getElementById('af-smtp-tls').checked,
   };
-  if (!data.name || !data.email || !data.imap_host || !data.smtp_host) {
-    toast('Preencha todos os campos obrigatórios', 'error'); return;
-  }
+  if (!data.name || !data.email || !data.imap_host || !data.smtp_host) { toast('Preencha todos os campos obrigatórios', 'error'); return; }
   let res;
   if (state.editAccountId) {
     res = await fetch(`/api/accounts/${state.editAccountId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
@@ -545,7 +714,6 @@ async function testAccount() {
   const btn = document.getElementById('af-test-btn');
   btn.textContent = 'Testando...';
   btn.disabled = true;
-
   const data = {
     name: document.getElementById('af-name').value.trim(),
     email: document.getElementById('af-email').value.trim(),
@@ -559,19 +727,16 @@ async function testAccount() {
     smtp_ssl: document.getElementById('af-smtp-ssl').checked,
     smtp_tls: document.getElementById('af-smtp-tls').checked,
   };
-
   if (state.editAccountId) {
     const res = await fetch(`/api/accounts/${state.editAccountId}/test`, { method: 'POST' });
-    const result = await res.json();
-    showTestResult(result);
+    showTestResult(await res.json());
   } else {
     const createRes = await fetch('/api/accounts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
     if (!createRes.ok) { toast('Preencha todos os campos para testar', 'error'); btn.textContent = '🔌 Testar'; btn.disabled = false; return; }
     const acc = await createRes.json();
     const testRes = await fetch(`/api/accounts/${acc.id}/test`, { method: 'POST' });
-    const result = await testRes.json();
     await fetch(`/api/accounts/${acc.id}`, { method: 'DELETE' });
-    showTestResult(result);
+    showTestResult(await testRes.json());
     await loadAccounts();
   }
   btn.textContent = '🔌 Testar';
@@ -579,11 +744,8 @@ async function testAccount() {
 }
 
 function showTestResult(result) {
-  if (result.ok) {
-    toast('✓ Conexão bem-sucedida!', 'success');
-  } else {
-    toast(result.errors.join(' | '), 'error');
-  }
+  if (result.ok) toast('✓ Conexão bem-sucedida!', 'success');
+  else toast(result.errors.join(' | '), 'error');
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -596,12 +758,8 @@ function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   const now = new Date();
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-  }
-  if (now - d < 7 * 86400000) {
-    return d.toLocaleDateString('pt-BR', { weekday: 'short' });
-  }
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (now - d < 7 * 86400000) return d.toLocaleDateString('pt-BR', { weekday: 'short' });
   return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
 }
 
@@ -627,19 +785,17 @@ function toast(msg, type = 'info') {
 }
 
 // close modals on backdrop click
-document.getElementById('compose-modal').addEventListener('click', e => {
-  if (e.target === document.getElementById('compose-modal')) closeCompose();
-});
-document.getElementById('account-modal').addEventListener('click', e => {
-  if (e.target === document.getElementById('account-modal')) closeAccountModal();
-});
+document.getElementById('compose-modal').addEventListener('click', e => { if (e.target === document.getElementById('compose-modal')) closeCompose(); });
+document.getElementById('account-modal').addEventListener('click', e => { if (e.target === document.getElementById('account-modal')) closeAccountModal(); });
 
 // keyboard shortcuts
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { closeCompose(); closeAccountModal(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); openCompose(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'r' && state.selectedEmailId) { e.preventDefault(); replyEmail(); }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'R' && state.selectedEmailId) { e.preventDefault(); replyAll(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'l' && state.selectedEmailId) { e.preventDefault(); forwardEmail(); }
+  if (e.key === 'p' && (e.ctrlKey || e.metaKey) && state.selectedEmailId) { e.preventDefault(); printEmail(); }
 });
 
-// ── Start ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', init);
