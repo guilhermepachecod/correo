@@ -145,8 +145,11 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 /* ── Account modal ── */
 #account-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); backdrop-filter: blur(4px); z-index: 200; align-items: center; justify-content: center; }
 #account-modal.open { display: flex; }
-#account-box { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); width: 500px; max-height: 90vh; overflow-y: auto; padding: 24px; }
-#account-box h2 { font-size: 16px; font-weight: 500; margin-bottom: 20px; }
+#account-box { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); width: 500px; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+#account-box-header { padding: 20px 24px 0; flex-shrink: 0; }
+#account-box-body { flex: 1; overflow-y: auto; padding: 0 24px 8px; }
+#account-box-footer { flex-shrink: 0; padding: 12px 24px 20px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; background: var(--bg2); }
+#account-box-header h2 { font-size: 16px; font-weight: 500; margin-bottom: 16px; }
 .form-group { margin-bottom: 14px; }
 .form-label { font-size: 12px; color: var(--muted); margin-bottom: 5px; display: block; }
 .form-input { width: 100%; background: var(--bg3); border: 1px solid var(--line); border-radius: 8px; color: var(--text); font-family: var(--font); font-size: 13px; padding: 9px 12px; outline: none; transition: border-color var(--trans); }
@@ -309,62 +312,67 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 <!-- ACCOUNT MODAL -->
 <div id="account-modal">
   <div id="account-box">
-    <h2>Gerenciar contas</h2>
-    <div id="account-list"></div>
+    <div id="account-box-header">
+      <h2>Gerenciar contas</h2>
+    </div>
+    <div id="account-box-body">
+      <div id="account-list"></div>
 
-    <hr class="form-divider">
+      <hr class="form-divider">
 
-    <!-- Sync .conf -->
-    <div style="margin-bottom:16px;">
-      <button id="sync-conf-btn" onclick="syncConf()">⟳ Ler arquivos .conf</button>
-      <div class="conf-hint">
-        Lê os arquivos em <code>/app/accounts/*.conf</code> e sincroniza com o banco.<br>
-        Cada arquivo representa uma conta. Ex: <code>pessoal.conf</code>
+      <!-- Sync .conf -->
+      <div style="margin-bottom:16px;">
+        <button id="sync-conf-btn" onclick="syncConf()">⟳ Ler arquivos .conf</button>
+        <div class="conf-hint">
+          Lê os arquivos em <code>/app/accounts/*.conf</code> e sincroniza com o banco.<br>
+          Cada arquivo representa uma conta. Ex: <code>pessoal.conf</code>
+        </div>
+      </div>
+
+      <hr class="form-divider">
+
+      <h2 id="account-form-title" style="margin-bottom:16px;font-size:14px;">Adicionar conta</h2>
+      <div class="form-group">
+        <label class="form-label">Nome de exibição <span style="color:var(--muted);font-size:11px;">(será o nome do arquivo .conf)</span></label>
+        <input class="form-input" id="af-name" type="text" placeholder="pessoal">
+      </div>
+      <div class="form-group">
+        <label class="form-label">E-mail</label>
+        <input class="form-input" id="af-email" type="email" placeholder="voce@email.com">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Usuário (login)</label>
+        <input class="form-input" id="af-username" type="text" placeholder="geralmente o próprio e-mail">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Senha</label>
+        <input class="form-input" id="af-password" type="password" placeholder="senha ou app password">
+      </div>
+      <hr class="form-divider">
+      <div style="margin-bottom:10px;font-size:12px;color:var(--muted);">IMAP (recebimento)</div>
+      <div class="form-row form-group">
+        <input class="form-input" id="af-imap-host" type="text" placeholder="imap.gmail.com">
+        <input class="form-input" id="af-imap-port" type="number" placeholder="993">
+      </div>
+      <label class="form-check form-group"><input type="checkbox" id="af-imap-ssl" checked> SSL/TLS</label>
+      <div style="margin-bottom:10px;font-size:12px;color:var(--muted);">SMTP (envio)</div>
+      <div class="form-row form-group">
+        <input class="form-input" id="af-smtp-host" type="text" placeholder="smtp.gmail.com">
+        <input class="form-input" id="af-smtp-port" type="number" placeholder="587">
+      </div>
+      <div style="display:flex;gap:16px;" class="form-group">
+        <label class="form-check"><input type="checkbox" id="af-smtp-ssl"> SSL</label>
+        <label class="form-check"><input type="checkbox" id="af-smtp-tls" checked> STARTTLS</label>
       </div>
     </div>
-
-    <hr class="form-divider">
-
-    <h2 id="account-form-title" style="margin-bottom:16px;font-size:14px;">Adicionar conta</h2>
-    <div class="form-group">
-      <label class="form-label">Nome de exibição <span style="color:var(--muted);font-size:11px;">(será o nome do arquivo .conf)</span></label>
-      <input class="form-input" id="af-name" type="text" placeholder="pessoal">
-    </div>
-    <div class="form-group">
-      <label class="form-label">E-mail</label>
-      <input class="form-input" id="af-email" type="email" placeholder="voce@email.com">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Usuário (login)</label>
-      <input class="form-input" id="af-username" type="text" placeholder="geralmente o próprio e-mail">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Senha</label>
-      <input class="form-input" id="af-password" type="password" placeholder="senha ou app password">
-    </div>
-    <hr class="form-divider">
-    <div style="margin-bottom:10px;font-size:12px;color:var(--muted);">IMAP (recebimento)</div>
-    <div class="form-row form-group">
-      <input class="form-input" id="af-imap-host" type="text" placeholder="imap.gmail.com">
-      <input class="form-input" id="af-imap-port" type="number" placeholder="993">
-    </div>
-    <label class="form-check form-group"><input type="checkbox" id="af-imap-ssl" checked> SSL/TLS</label>
-    <div style="margin-bottom:10px;font-size:12px;color:var(--muted);">SMTP (envio)</div>
-    <div class="form-row form-group">
-      <input class="form-input" id="af-smtp-host" type="text" placeholder="smtp.gmail.com">
-      <input class="form-input" id="af-smtp-port" type="number" placeholder="587">
-    </div>
-    <div style="display:flex;gap:16px;" class="form-group">
-      <label class="form-check"><input type="checkbox" id="af-smtp-ssl"> SSL</label>
-      <label class="form-check"><input type="checkbox" id="af-smtp-tls" checked> STARTTLS</label>
-    </div>
-    <div class="form-actions">
+    <div id="account-box-footer">
       <button class="btn btn-ghost" onclick="closeAccountModal()">Cancelar</button>
       <button class="btn btn-ghost" id="af-test-btn" onclick="testAccount()">🔌 Testar</button>
       <button class="btn btn-primary" onclick="saveAccount()">Salvar</button>
     </div>
   </div>
 </div>
+
 
 <div id="toast"></div>
 
