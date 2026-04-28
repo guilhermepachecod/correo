@@ -59,7 +59,14 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 .sidebar-action:hover { background: var(--bg3); color: var(--text); }
 
 /* ── Email list ── */
-#email-list-panel { background: var(--bg2); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+#email-list-panel {
+  background: var(--bg2);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
 #list-header { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
 #list-title { font-size: 15px; font-weight: 500; flex: 1; }
 #search-wrap { flex: 1; position: relative; }
