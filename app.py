@@ -29,13 +29,7 @@ mail_service = MailService(db, socketio)
 
 with app.app_context():
     db.create_all()
-    # Migration: adiciona conf_file se não existir
-    with db.engine.connect() as conn:
-        try:
-            conn.execute(db.text("ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)"))
-            conn.commit()
-        except Exception:
-            pass  # coluna já existe, ignora
+
 
 # ── .conf helpers ──────────────────────────────────────────────────────────────
 

@@ -103,13 +103,11 @@ class MailService:
 
     def test_connection(self, account: Account):
         errors = []
-        # Test IMAP
         try:
             conn = self._imap_connect(account)
             conn.logout()
         except Exception as e:
             errors.append(f'IMAP: {e}')
-        # Test SMTP
         try:
             if account.smtp_ssl:
                 s = smtplib.SMTP_SSL(account.smtp_host, account.smtp_port, timeout=10)
@@ -134,10 +132,12 @@ class MailService:
             for item in folder_list:
                 if isinstance(item, bytes):
                     decoded = item.decode('utf-8', errors='replace')
-                    parts = decoded.split('"/"')
-                    if len(parts) >= 2:
-                        name = parts[-1].strip().strip('"')
+                    # Suporta separadores "." e "/" (ex: "." INBOX.Sent ou "/" INBOX/Sent)
+                    match = re.search(r'\(.*?\)\s+"?[./]"?\s+(.*)', decoded)
+                    if match:
+                        name = match.group(1).strip().strip('"')
                         folders.append(name)
+            log.info(f'Pastas encontradas para {account.email}: {folders}')
             return folders
         except Exception as e:
             log.error(f'get_folders error: {e}')
@@ -152,6 +152,7 @@ class MailService:
         self._emit('sync_start', {'account_id': account_id, 'email': account.email})
         try:
             folders_to_sync = self._get_sync_folders(account)
+            log.info(f'Sincronizando pastas: {folders_to_sync}')
             for folder in folders_to_sync:
                 self._sync_folder(account, folder)
             account.last_sync = datetime.utcnow()
@@ -163,12 +164,14 @@ class MailService:
 
     def _get_sync_folders(self, account: Account):
         folders = self.get_folders(account)
-        priority = ['INBOX', 'Sent', 'Drafts', 'Junk', 'Spam', 'Trash']
+        priority_keywords = ['inbox', 'sent', 'drafts', 'junk', 'spam', 'trash', 'archive']
         result = []
-        for p in priority:
+        # Prioridade: pastas que contêm keywords
+        for keyword in priority_keywords:
             for f in folders:
-                if p.lower() in f.lower() and f not in result:
+                if keyword in f.lower() and f not in result:
                     result.append(f)
+        # Resto
         for f in folders:
             if f not in result:
                 result.append(f)
@@ -180,10 +183,10 @@ class MailService:
             conn = self._imap_connect(account)
             status, _ = conn.select(f'"{folder}"', readonly=True)
             if status != 'OK':
+                log.warning(f'Não foi possível selecionar pasta: {folder}')
                 conn.logout()
                 return
 
-            # Get UIDs already stored
             existing = set(
                 row[0] for row in
                 _db.session.query(Email.uid).filter_by(account_id=account.id, folder=folder).all()
@@ -191,9 +194,10 @@ class MailService:
 
             _, data = conn.uid('search', None, 'ALL')
             all_uids = data[0].split() if data[0] else []
-            # Fetch newest 200 emails
             uids_to_fetch = all_uids[-200:]
             new_uids = [u for u in uids_to_fetch if int(u) not in existing]
+
+            log.info(f'Pasta {folder}: {len(all_uids)} total, {len(new_uids)} novos')
 
             if not new_uids:
                 conn.logout()
@@ -368,7 +372,7 @@ class MailService:
             s.sendmail(account.email, recipients, msg.as_string())
             s.quit()
 
-            # Save to Sent folder via IMAP
+            # Salva na pasta Sent via IMAP
             try:
                 conn = self._imap_connect(account)
                 folders = self.get_folders(account)
