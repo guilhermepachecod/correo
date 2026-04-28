@@ -161,12 +161,22 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
 .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
 .btn-danger { background: var(--red); color: #fff; }
+.btn-danger:hover { opacity: .85; }
+.btn-purge { background: transparent; color: var(--red); border: 1px solid var(--red); opacity: .7; }
+.btn-purge:hover { opacity: 1; }
 .form-divider { border: none; border-top: 1px solid var(--line); margin: 16px 0; }
-.account-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.account-list-item { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .account-list-item:last-child { border-bottom: none; }
-.account-list-info { flex: 1; }
+.account-list-info { flex: 1; min-width: 0; }
 .account-list-name { font-size: 13px; font-weight: 500; }
 .account-list-email { font-size: 12px; color: var(--muted); }
+.account-list-conf { font-size: 11px; color: var(--muted); opacity: .7; margin-top: 2px; font-family: var(--mono); }
+
+/* ── Conf sync btn ── */
+#sync-conf-btn { width: 100%; margin-top: 4px; background: transparent; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-family: var(--font); font-size: 12px; padding: 8px 12px; cursor: pointer; transition: all var(--trans); text-align: left; }
+#sync-conf-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+#sync-conf-btn:disabled { opacity: .5; cursor: not-allowed; }
+.conf-hint { font-size: 11px; color: var(--muted); opacity: .6; margin-top: 6px; line-height: 1.5; font-family: var(--mono); }
 
 /* ── Toast ── */
 #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--bg3); border: 1px solid var(--line); border-radius: 10px; padding: 10px 18px; font-size: 13px; opacity: 0; transition: all .3s ease; z-index: 999; pointer-events: none; white-space: nowrap; }
@@ -301,11 +311,24 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   <div id="account-box">
     <h2>Gerenciar contas</h2>
     <div id="account-list"></div>
+
     <hr class="form-divider">
+
+    <!-- Sync .conf -->
+    <div style="margin-bottom:16px;">
+      <button id="sync-conf-btn" onclick="syncConf()">⟳ Ler arquivos .conf</button>
+      <div class="conf-hint">
+        Lê os arquivos em <code>/app/accounts/*.conf</code> e sincroniza com o banco.<br>
+        Cada arquivo representa uma conta. Ex: <code>pessoal.conf</code>
+      </div>
+    </div>
+
+    <hr class="form-divider">
+
     <h2 id="account-form-title" style="margin-bottom:16px;font-size:14px;">Adicionar conta</h2>
     <div class="form-group">
-      <label class="form-label">Nome de exibição</label>
-      <input class="form-input" id="af-name" type="text" placeholder="Meu nome">
+      <label class="form-label">Nome de exibição <span style="color:var(--muted);font-size:11px;">(será o nome do arquivo .conf)</span></label>
+      <input class="form-input" id="af-name" type="text" placeholder="pessoal">
     </div>
     <div class="form-group">
       <label class="form-label">E-mail</label>

@@ -28,6 +28,7 @@ class Account(db.Model):
     smtp_tls = db.Column(db.Boolean, default=True)
     username = db.Column(db.String(255), nullable=False)
     password_enc = db.Column(db.Text, nullable=False)
+    conf_file = db.Column(db.String(255), nullable=True)  # nome do .conf associado
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_sync = db.Column(db.DateTime, nullable=True)
 
@@ -35,7 +36,11 @@ class Account(db.Model):
                              cascade='all, delete-orphan')
 
     def set_password(self, plain: str):
-        self.password_enc = _fernet.encrypt(plain.encode()).decode()
+        # Se já vier com prefixo enc: (lido do .conf), descriptografa e re-criptografa
+        if plain.startswith('enc:'):
+            self.password_enc = plain[4:]
+        else:
+            self.password_enc = _fernet.encrypt(plain.encode()).decode()
 
     def get_password(self) -> str:
         return _fernet.decrypt(self.password_enc.encode()).decode()
@@ -53,6 +58,7 @@ class Account(db.Model):
             'smtp_ssl': self.smtp_ssl,
             'smtp_tls': self.smtp_tls,
             'username': self.username,
+            'conf_file': self.conf_file,
             'last_sync': self.last_sync.isoformat() if self.last_sync else None,
         }
 

@@ -97,7 +97,6 @@ async function renderFolders() {
   const container = document.getElementById('folders');
   let folders = [...COMMON_FOLDERS];
 
-  // merge from DB counts
   for (const f of Object.keys(folderCounts)) {
     if (!folders.includes(f)) folders.push(f);
   }
@@ -158,7 +157,6 @@ async function loadEmails() {
 function renderEmailList() {
   const container = document.getElementById('email-list');
   const empty = document.getElementById('list-empty');
-  // remove old items
   container.querySelectorAll('.email-item').forEach(e => e.remove());
 
   if (state.emails.length === 0) {
@@ -192,7 +190,6 @@ function renderEmailList() {
 // ── Email view ─────────────────────────────────────────────────────────────────
 async function openEmail(id) {
   state.selectedEmailId = id;
-  // mark active in list
   document.querySelectorAll('.email-item').forEach(el => {
     el.classList.toggle('active', parseInt(el.dataset.id) === id);
   });
@@ -200,7 +197,6 @@ async function openEmail(id) {
   const res = await fetch(`/api/emails/${id}`);
   const email = await res.json();
 
-  // mark read in list state
   const listEmail = state.emails.find(e => e.id === id);
   if (listEmail) { listEmail.is_read = true; renderEmailList(); }
 
@@ -222,7 +218,6 @@ async function openEmail(id) {
   starBtn._emailId = id;
   starBtn._starred = email.is_starred;
 
-  // Attachments
   const attDiv = document.getElementById('ev-attachments');
   if (email.attachments && email.attachments.length > 0) {
     attDiv.style.display = 'flex';
@@ -238,13 +233,11 @@ async function openEmail(id) {
     attDiv.innerHTML = '';
   }
 
-  // Body
   const bodyHtml = document.getElementById('ev-body-html');
   const bodyText = document.getElementById('ev-body-text');
   if (email.body_html) {
     bodyHtml.style.display = 'block';
     bodyText.style.display = 'none';
-    // Sanitize: remove scripts
     const clean = email.body_html.replace(/<script[\s\S]*?<\/script>/gi, '')
                                   .replace(/on\w+="[^"]*"/gi, '');
     bodyHtml.innerHTML = clean;
@@ -254,7 +247,6 @@ async function openEmail(id) {
     bodyText.textContent = email.body_text || '';
   }
 
-  // store for reply
   view._email = email;
 }
 
@@ -388,6 +380,32 @@ async function syncCurrent() {
   setTimeout(() => btn.classList.remove('spinning'), 2000);
 }
 
+// ── Sync .conf ─────────────────────────────────────────────────────────────────
+async function syncConf() {
+  const btn = document.getElementById('sync-conf-btn');
+  btn.disabled = true;
+  btn.textContent = '⟳ Sincronizando...';
+  try {
+    const res = await fetch('/api/accounts/sync-conf', { method: 'POST' });
+    const data = await res.json();
+    const parts = [];
+    if (data.created.length) parts.push(`${data.created.length} criada(s)`);
+    if (data.updated.length) parts.push(`${data.updated.length} atualizada(s)`);
+    if (data.deleted.length) parts.push(`${data.deleted.length} removida(s)`);
+    if (data.errors.length) {
+      toast(`Erros: ${data.errors.join(' | ')}`, 'error');
+    } else {
+      toast(parts.length ? parts.join(', ') : 'Nenhuma alteração', 'success');
+    }
+    await loadAccounts();
+  } catch (e) {
+    toast('Erro ao sincronizar contas', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⟳ Ler arquivos .conf';
+  }
+}
+
 // ── Search ─────────────────────────────────────────────────────────────────────
 let searchTimer;
 function debounceSearch() {
@@ -414,15 +432,20 @@ function closeAccountModal() {
 
 function renderAccountList() {
   const list = document.getElementById('account-list');
-  if (!state.accounts.length) { list.innerHTML = '<div style="color:var(--muted);font-size:13px;margin-bottom:12px;">Nenhuma conta cadastrada</div>'; return; }
+  if (!state.accounts.length) {
+    list.innerHTML = '<div style="color:var(--muted);font-size:13px;margin-bottom:12px;">Nenhuma conta cadastrada</div>';
+    return;
+  }
   list.innerHTML = state.accounts.map(a => `
     <div class="account-list-item">
       <div class="account-list-info">
         <div class="account-list-name">${esc(a.name)}</div>
         <div class="account-list-email">${esc(a.email)}</div>
+        ${a.conf_file ? `<div class="account-list-conf">📄 ${esc(a.conf_file)}</div>` : ''}
       </div>
       <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;" onclick="editAccount(${a.id})">Editar</button>
       <button class="btn btn-danger" style="padding:5px 10px;font-size:12px;" onclick="deleteAccount(${a.id})">Remover</button>
+      <button class="btn btn-purge" style="padding:5px 10px;font-size:12px;" onclick="purgeAccount(${a.id})" title="Remove conta e todos os e-mails">🗑 Limpar</button>
     </div>
   `).join('');
 }
@@ -446,12 +469,30 @@ function editAccount(id) {
 }
 
 async function deleteAccount(id) {
-  if (!confirm('Remover esta conta e todos os seus e-mails?')) return;
+  if (!confirm('Remover esta conta? Os e-mails serão mantidos.')) return;
   await fetch(`/api/accounts/${id}`, { method: 'DELETE' });
   await loadAccounts();
-  if (state.selectedAccountId === id) { state.selectedAccountId = null; document.getElementById('account-select').value = ''; }
+  if (state.selectedAccountId === id) {
+    state.selectedAccountId = null;
+    document.getElementById('account-select').value = '';
+  }
   loadEmails();
   toast('Conta removida', 'success');
+}
+
+async function purgeAccount(id) {
+  const a = state.accounts.find(x => x.id === id);
+  if (!confirm(`Limpar "${a?.name}"? Isso removerá a conta E TODOS OS E-MAILS permanentemente.`)) return;
+  await fetch(`/api/accounts/${id}/purge`, { method: 'DELETE' });
+  await loadAccounts();
+  if (state.selectedAccountId === id) {
+    state.selectedAccountId = null;
+    document.getElementById('account-select').value = '';
+    hideEmail();
+  }
+  loadEmails();
+  updateFolderCounts();
+  toast('Conta e e-mails removidos', 'success');
 }
 
 function clearAccountForm() {
@@ -505,7 +546,6 @@ async function testAccount() {
   btn.textContent = 'Testando...';
   btn.disabled = true;
 
-  // Build a temp object to test current form values
   const data = {
     name: document.getElementById('af-name').value.trim(),
     email: document.getElementById('af-email').value.trim(),
@@ -520,13 +560,11 @@ async function testAccount() {
     smtp_tls: document.getElementById('af-smtp-tls').checked,
   };
 
-  // Save temporarily to test (if editing, use existing id)
   if (state.editAccountId) {
     const res = await fetch(`/api/accounts/${state.editAccountId}/test`, { method: 'POST' });
     const result = await res.json();
     showTestResult(result);
   } else {
-    // Create temp, test, delete
     const createRes = await fetch('/api/accounts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
     if (!createRes.ok) { toast('Preencha todos os campos para testar', 'error'); btn.textContent = '🔌 Testar'; btn.disabled = false; return; }
     const acc = await createRes.json();
