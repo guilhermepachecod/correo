@@ -29,22 +29,32 @@ mail_service = MailService(db, socketio)
 
 with app.app_context():
     db.create_all()
-    # Migration: adiciona conf_file se não existir
-    with db.engine.connect() as conn:
-        try:
-            conn.execute(db.text("ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)"))
-            conn.commit()
-        except Exception:
-            pass
 
 
 # ── .conf helpers ──────────────────────────────────────────────────────────────
 
 def _safe_filename(name: str) -> str:
+    """Converte nome de exibição em nome de arquivo seguro."""
     return re.sub(r'[^\w\-]', '_', name).strip('_') or 'conta'
 
 
+def _conf_path_for_account(account: Account) -> Path:
+    """Retorna o caminho do .conf de uma conta (busca por email ou nome)."""
+    # Tenta encontrar pelo campo conf_file salvo
+    if account.conf_file:
+        p = ACCOUNTS_DIR / account.conf_file
+        if p.exists():
+            return p
+    # Fallback: busca por email nos arquivos existentes
+    for conf in ACCOUNTS_DIR.glob('*.conf'):
+        data = _read_conf(conf)
+        if data.get('email', '').lower() == account.email.lower():
+            return conf
+    return None
+
+
 def _read_conf(path: Path) -> dict:
+    """Lê um arquivo .conf simples (chave=valor)."""
     data = {}
     try:
         for line in path.read_text(encoding='utf-8').splitlines():
@@ -60,6 +70,7 @@ def _read_conf(path: Path) -> dict:
 
 
 def _write_conf(path: Path, data: dict):
+    """Escreve um arquivo .conf simples."""
     lines = []
     order = ['email', 'user', 'pass',
              'imap_host', 'imap_port', 'imap_ssl',
@@ -74,19 +85,30 @@ def _write_conf(path: Path, data: dict):
 
 
 def _sync_conf_to_db():
+    """
+    Lê todos os .conf e sincroniza com o banco:
+    - Cria conta se não existir
+    - Atualiza conta se existir
+    - Deleta conta se .conf foi removido (mantém e-mails)
+    - Criptografa senha plaintext no arquivo
+    Retorna dict com resultado.
+    """
     result = {'created': [], 'updated': [], 'deleted': [], 'errors': []}
+
     conf_files = list(ACCOUNTS_DIR.glob('*.conf'))
     conf_emails = set()
 
     for conf_path in conf_files:
-        name = conf_path.stem
+        name = conf_path.stem  # nome do arquivo sem extensão
         data = _read_conf(conf_path)
+
         email = data.get('email', '').strip()
         if not email:
             result['errors'].append(f'{conf_path.name}: campo "email" ausente')
             continue
 
         conf_emails.add(email.lower())
+
         username = data.get('user', email)
         raw_pass = data.get('pass', '')
         imap_host = data.get('imap_host', '')
@@ -104,6 +126,7 @@ def _sync_conf_to_db():
         account = Account.query.filter_by(email=email).first()
 
         if account:
+            # Atualiza
             account.name = name
             account.username = username
             account.imap_host = imap_host
@@ -114,33 +137,44 @@ def _sync_conf_to_db():
             account.smtp_ssl = smtp_ssl
             account.smtp_tls = smtp_tls
             account.conf_file = conf_path.name
-            if raw_pass and not raw_pass.startswith('enc:'):
+            if raw_pass:
                 account.set_password(raw_pass)
             db.session.commit()
             result['updated'].append(email)
         else:
+            # Cria
             if not raw_pass:
                 result['errors'].append(f'{conf_path.name}: campo "pass" ausente para nova conta')
                 continue
             account = Account(
-                name=name, email=email, username=username,
-                imap_host=imap_host, imap_port=imap_port, imap_ssl=imap_ssl,
-                smtp_host=smtp_host, smtp_port=smtp_port, smtp_ssl=smtp_ssl,
-                smtp_tls=smtp_tls, conf_file=conf_path.name,
+                name=name,
+                email=email,
+                username=username,
+                imap_host=imap_host,
+                imap_port=imap_port,
+                imap_ssl=imap_ssl,
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+                smtp_ssl=smtp_ssl,
+                smtp_tls=smtp_tls,
+                conf_file=conf_path.name,
             )
             account.set_password(raw_pass)
             db.session.add(account)
             db.session.commit()
             result['created'].append(email)
 
+        # Criptografa senha no arquivo se estava em plaintext
         if raw_pass and not raw_pass.startswith('enc:'):
-            encrypted = account.password_enc
+            encrypted = account.password_enc  # já criptografado pelo set_password
             data['pass'] = f'enc:{encrypted}'
             _write_conf(conf_path, data)
 
+    # Deleta contas cujo .conf foi removido
     all_accounts = Account.query.all()
     for account in all_accounts:
         if account.conf_file and account.email.lower() not in conf_emails:
+            # Verifica se o .conf ainda existe
             conf_path = ACCOUNTS_DIR / account.conf_file
             if not conf_path.exists():
                 db.session.delete(account)
@@ -151,6 +185,7 @@ def _sync_conf_to_db():
 
 
 def _account_to_conf_data(account: Account) -> dict:
+    """Converte uma conta em dict para gravar no .conf."""
     return {
         'email': account.email,
         'user': account.username,
@@ -176,7 +211,8 @@ def index():
 
 @app.route('/api/accounts', methods=['GET'])
 def get_accounts():
-    return jsonify([a.to_dict() for a in Account.query.all()])
+    accounts = Account.query.all()
+    return jsonify([a.to_dict() for a in accounts])
 
 
 @app.route('/api/accounts', methods=['POST'])
@@ -187,7 +223,9 @@ def create_account():
         if not data.get(field):
             return jsonify({'error': f'Campo obrigatório: {field}'}), 400
     try:
+        # Gera nome do arquivo .conf
         conf_filename = f"{_safe_filename(data['name'])}.conf"
+        # Garante unicidade
         base = _safe_filename(data['name'])
         counter = 1
         while (ACCOUNTS_DIR / conf_filename).exists():
@@ -195,17 +233,25 @@ def create_account():
             counter += 1
 
         account = Account(
-            name=data['name'], email=data['email'],
-            imap_host=data['imap_host'], imap_port=int(data['imap_port']),
+            name=data['name'],
+            email=data['email'],
+            imap_host=data['imap_host'],
+            imap_port=int(data['imap_port']),
             imap_ssl=data.get('imap_ssl', True),
-            smtp_host=data['smtp_host'], smtp_port=int(data['smtp_port']),
-            smtp_ssl=data.get('smtp_ssl', False), smtp_tls=data.get('smtp_tls', True),
-            username=data['username'], conf_file=conf_filename,
+            smtp_host=data['smtp_host'],
+            smtp_port=int(data['smtp_port']),
+            smtp_ssl=data.get('smtp_ssl', False),
+            smtp_tls=data.get('smtp_tls', True),
+            username=data['username'],
+            conf_file=conf_filename,
         )
         account.set_password(data['password'])
         db.session.add(account)
         db.session.commit()
+
+        # Grava .conf
         _write_conf(ACCOUNTS_DIR / conf_filename, _account_to_conf_data(account))
+
         return jsonify(account.to_dict()), 201
     except Exception as e:
         db.session.rollback()
@@ -216,13 +262,17 @@ def create_account():
 def update_account(account_id):
     account = Account.query.get_or_404(account_id)
     data = request.json
+
     old_conf_file = account.conf_file
+
     for field in ['name', 'email', 'imap_host', 'imap_port', 'imap_ssl',
                   'smtp_host', 'smtp_port', 'smtp_ssl', 'smtp_tls', 'username']:
         if field in data:
             setattr(account, field, data[field])
     if data.get('password'):
         account.set_password(data['password'])
+
+    # Se o nome mudou, renomeia o .conf
     new_conf_filename = f"{_safe_filename(account.name)}.conf"
     if old_conf_file and old_conf_file != new_conf_filename:
         old_path = ACCOUNTS_DIR / old_conf_file
@@ -232,14 +282,20 @@ def update_account(account_id):
             account.conf_file = new_conf_filename
     elif not old_conf_file:
         account.conf_file = new_conf_filename
+
     db.session.commit()
-    _write_conf(ACCOUNTS_DIR / account.conf_file, _account_to_conf_data(account))
+
+    # Atualiza .conf
+    conf_path = ACCOUNTS_DIR / account.conf_file
+    _write_conf(conf_path, _account_to_conf_data(account))
+
     return jsonify(account.to_dict())
 
 
 @app.route('/api/accounts/<int:account_id>', methods=['DELETE'])
 def delete_account(account_id):
     account = Account.query.get_or_404(account_id)
+    # Remove .conf mas mantém e-mails
     if account.conf_file:
         conf_path = ACCOUNTS_DIR / account.conf_file
         if conf_path.exists():
@@ -251,11 +307,13 @@ def delete_account(account_id):
 
 @app.route('/api/accounts/<int:account_id>/purge', methods=['DELETE'])
 def purge_account(account_id):
+    """Deleta conta + todos os e-mails + .conf."""
     account = Account.query.get_or_404(account_id)
     if account.conf_file:
         conf_path = ACCOUNTS_DIR / account.conf_file
         if conf_path.exists():
             conf_path.unlink()
+    # cascade delete já remove emails e attachments
     db.session.delete(account)
     db.session.commit()
     return jsonify({'ok': True})
@@ -264,7 +322,8 @@ def purge_account(account_id):
 @app.route('/api/accounts/<int:account_id>/test', methods=['POST'])
 def test_account(account_id):
     account = Account.query.get_or_404(account_id)
-    return jsonify(mail_service.test_connection(account))
+    result = mail_service.test_connection(account)
+    return jsonify(result)
 
 
 @app.route('/api/accounts/<int:account_id>/sync', methods=['POST'])
@@ -274,22 +333,27 @@ def sync_account(account_id):
         with app.app_context():
             mail_service.sync_account(account_id)
     threading.Thread(target=run, daemon=True).start()
-    return jsonify({'ok': True})
+    return jsonify({'ok': True, 'message': 'Sincronização iniciada'})
 
 
 @app.route('/api/sync/all', methods=['POST'])
 def sync_all():
     def run():
         with app.app_context():
-            for account in Account.query.all():
+            accounts = Account.query.all()
+            for account in accounts:
                 mail_service.sync_account(account.id)
     threading.Thread(target=run, daemon=True).start()
     return jsonify({'ok': True})
 
 
+# ── Conf sync ──────────────────────────────────────────────────────────────────
+
 @app.route('/api/accounts/sync-conf', methods=['POST'])
 def sync_conf():
-    return jsonify(_sync_conf_to_db())
+    """Lê todos os .conf e sincroniza com o banco."""
+    result = _sync_conf_to_db()
+    return jsonify(result)
 
 
 # ── Emails ─────────────────────────────────────────────────────────────────────
@@ -341,29 +405,6 @@ def toggle_star(email_id):
     return jsonify({'starred': email.is_starred})
 
 
-@app.route('/api/emails/<int:email_id>/read', methods=['POST'])
-def set_read(email_id):
-    email = Email.query.get_or_404(email_id)
-    is_read = request.json.get('read', True)
-    email.is_read = is_read
-    db.session.commit()
-    if is_read:
-        mail_service.mark_read_on_server(email)
-    else:
-        mail_service.mark_unread_on_server(email)
-    return jsonify({'read': email.is_read})
-
-
-@app.route('/api/emails/<int:email_id>/spam', methods=['POST'])
-def set_spam(email_id):
-    email = Email.query.get_or_404(email_id)
-    mark_as_spam = request.json.get('spam', True)
-    result = mail_service.set_spam(email, mark_as_spam)
-    if result:
-        db.session.refresh(email)
-    return jsonify({'ok': result, 'folder': email.folder})
-
-
 @app.route('/api/emails/<int:email_id>', methods=['DELETE'])
 def delete_email(email_id):
     email = Email.query.get_or_404(email_id)
@@ -393,51 +434,6 @@ def send_email():
     return jsonify(result)
 
 
-# ── Bulk actions ───────────────────────────────────────────────────────────────
-
-@app.route('/api/emails/bulk', methods=['POST'])
-def bulk_action():
-    data = request.json
-    action = data.get('action')
-    ids = data.get('ids', [])          # lista de IDs, vazio = todos da pasta
-    folder = data.get('folder', 'INBOX')
-    account_id = data.get('account_id')
-
-    if ids:
-        emails = Email.query.filter(Email.id.in_(ids)).all()
-    else:
-        # todos da pasta
-        query = Email.query.filter_by(folder=folder)
-        if account_id:
-            query = query.filter_by(account_id=account_id)
-        emails = query.all()
-
-    count = 0
-    for email in emails:
-        try:
-            if action == 'mark_read':
-                if not email.is_read:
-                    email.is_read = True
-                    mail_service.mark_read_on_server(email)
-            elif action == 'mark_unread':
-                if email.is_read:
-                    email.is_read = False
-                    mail_service.mark_unread_on_server(email)
-            elif action == 'mark_spam':
-                mail_service.set_spam(email, True)
-            elif action == 'mark_not_spam':
-                mail_service.set_spam(email, False)
-            elif action == 'delete':
-                mail_service.delete_email(email)
-                db.session.delete(email)
-            count += 1
-        except Exception as e:
-            log.warning(f'bulk_action {action} error on email {email.id}: {e}')
-
-    db.session.commit()
-    return jsonify({'ok': True, 'count': count})
-
-
 @app.route('/api/emails/<int:email_id>/folders', methods=['POST'])
 def move_email(email_id):
     email = Email.query.get_or_404(email_id)
@@ -453,7 +449,8 @@ def move_email(email_id):
 @app.route('/api/accounts/<int:account_id>/folders')
 def get_folders(account_id):
     account = Account.query.get_or_404(account_id)
-    return jsonify(mail_service.get_folders(account))
+    folders = mail_service.get_folders(account)
+    return jsonify(folders)
 
 
 @app.route('/api/folders/counts')
