@@ -1,0 +1,34 @@
+body { margin:0; font-family: Arial; }
+
+#app {
+  display:flex;
+  height:100vh;
+}
+
+#sidebar {
+  width:300px;
+  overflow:auto;
+  border-right:1px solid #ccc;
+}
+
+#splitter {
+  width:5px;
+  cursor:col-resize;
+}
+
+#viewer {
+  flex:1;
+  display:flex;
+  flex-direction:column;
+}
+
+#toolbar {
+  padding:5px;
+  border-bottom:1px solid #ccc;
+}
+
+#content {
+  flex:1;
+  overflow:auto;
+  padding:10px;
+}

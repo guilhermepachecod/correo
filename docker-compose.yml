@@ -9,3 +9,4 @@ services:
       - ./database:/app/database
     environment:
       - PYTHONUNBUFFERED=1
+      - TZ=America/Sao_Paulo
