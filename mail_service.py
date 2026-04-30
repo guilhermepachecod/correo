@@ -1,7 +1,6 @@
 import imaplib
 import smtplib
 import email as email_lib
-from email import policy as email_policy
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -10,55 +9,30 @@ from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from database import Email, Attachment, Account
 
 log = logging.getLogger(__name__)
 
-BATCH_SIZE = 50  # commit a cada N emails
-
-
-# ── Encoding helpers ───────────────────────────────────────────────────────────
 
 def _decode_header_value(value):
-    """Decodifica cabeçalhos MIME com fallback seguro para UTF-8/latin-1."""
     if not value:
         return ''
-    try:
-        parts = decode_header(value)
-        result = []
-        for part, charset in parts:
-            if isinstance(part, bytes):
-                cs = charset or 'utf-8'
-                try:
-                    result.append(part.decode(cs, errors='replace'))
-                except (LookupError, UnicodeDecodeError):
-                    result.append(part.decode('latin-1', errors='replace'))
-            else:
-                result.append(str(part))
-        return ''.join(result)
-    except Exception:
-        return str(value)
-
-
-def _decode_payload(part):
-    """Decodifica payload de uma parte MIME com suporte a quoted-printable e base64."""
-    try:
-        payload = part.get_payload(decode=True)
-        if not payload:
-            return ''
-        charset = part.get_content_charset() or 'utf-8'
-        try:
-            return payload.decode(charset, errors='replace')
-        except (LookupError, UnicodeDecodeError):
-            return payload.decode('latin-1', errors='replace')
-    except Exception:
-        return ''
+    parts = decode_header(value)
+    result = []
+    for part, charset in parts:
+        if isinstance(part, bytes):
+            try:
+                result.append(part.decode(charset or 'utf-8', errors='replace'))
+            except Exception:
+                result.append(part.decode('latin-1', errors='replace'))
+        else:
+            result.append(str(part))
+    return ''.join(result)
 
 
 def _get_body(msg):
-    """Extrai body text e html de uma mensagem, tratando multipart corretamente."""
     text, html = '', ''
     if msg.is_multipart():
         for part in msg.walk():
@@ -67,12 +41,18 @@ def _get_body(msg):
             if 'attachment' in cd:
                 continue
             if ct == 'text/plain' and not text:
-                text = _decode_payload(part)
+                payload = part.get_payload(decode=True)
+                charset = part.get_content_charset() or 'utf-8'
+                text = payload.decode(charset, errors='replace') if payload else ''
             elif ct == 'text/html' and not html:
-                html = _decode_payload(part)
+                payload = part.get_payload(decode=True)
+                charset = part.get_content_charset() or 'utf-8'
+                html = payload.decode(charset, errors='replace') if payload else ''
     else:
         ct = msg.get_content_type()
-        body = _decode_payload(msg)
+        payload = msg.get_payload(decode=True)
+        charset = msg.get_content_charset() or 'utf-8'
+        body = payload.decode(charset, errors='replace') if payload else ''
         if ct == 'text/html':
             html = body
         else:
@@ -81,7 +61,6 @@ def _get_body(msg):
 
 
 def _get_attachments(msg):
-    """Extrai anexos da mensagem."""
     attachments = []
     for part in msg.walk():
         cd = str(part.get('Content-Disposition', ''))
@@ -103,8 +82,6 @@ def _get_attachments(msg):
     return attachments
 
 
-# ── MailService ────────────────────────────────────────────────────────────────
-
 class MailService:
     def __init__(self, db, socketio):
         self.db = db
@@ -124,14 +101,19 @@ class MailService:
         conn.login(account.username, account.get_password())
         return conn
 
-    def _find_folder(self, account: Account, keywords):
-        """Encontra a primeira pasta que contém uma das keywords."""
+    def _find_spam_folder(self, account: Account):
         folders = self.get_folders(account)
-        for kw in keywords:
-            for f in folders:
-                if kw in f.lower():
-                    return f
+        for f in folders:
+            if any(k in f.lower() for k in ['spam', 'junk']):
+                return f
         return None
+
+    def _find_inbox_folder(self, account: Account):
+        folders = self.get_folders(account)
+        for f in folders:
+            if f.upper() == 'INBOX':
+                return f
+        return 'INBOX'
 
     def test_connection(self, account: Account):
         errors = []
@@ -182,17 +164,11 @@ class MailService:
         try:
             folders_to_sync = self._get_sync_folders(account)
             log.info(f'Sincronizando pastas: {folders_to_sync}')
-            total_new = 0
             for folder in folders_to_sync:
-                n = self._sync_folder(account, folder)
-                total_new += n
+                self._sync_folder(account, folder)
             account.last_sync = datetime.utcnow()
             _db.session.commit()
-            self._emit('sync_done', {
-                'account_id': account_id,
-                'email': account.email,
-                'new': total_new,
-            })
+            self._emit('sync_done', {'account_id': account_id, 'email': account.email})
         except Exception as e:
             log.error(f'sync_account error: {e}')
             self._emit('sync_error', {'account_id': account_id, 'error': str(e)})
@@ -210,78 +186,60 @@ class MailService:
                 result.append(f)
         return result[:10]
 
-    def _sync_folder(self, account: Account, folder: str) -> int:
-        """Sincroniza uma pasta. Retorna quantidade de novos emails."""
+    def _sync_folder(self, account: Account, folder: str):
         from database import db as _db
-        new_count = 0
         try:
             conn = self._imap_connect(account)
             status, _ = conn.select(f'"{folder}"', readonly=True)
             if status != 'OK':
                 log.warning(f'Não foi possível selecionar pasta: {folder}')
                 conn.logout()
-                return 0
+                return
 
-            # Cache de UIDs já existentes no banco — evita re-sync redundante
-            existing_uids = set(
+            existing = set(
                 row[0] for row in
-                _db.session.query(Email.uid)
-                    .filter_by(account_id=account.id, folder=folder)
-                    .all()
+                _db.session.query(Email.uid).filter_by(account_id=account.id, folder=folder).all()
             )
 
             _, data = conn.uid('search', None, 'ALL')
             all_uids = data[0].split() if data[0] else []
-            # Últimos 200 apenas
-            uids_to_check = all_uids[-200:]
-            new_uids = [u for u in uids_to_check if int(u) not in existing_uids]
+            uids_to_fetch = all_uids[-200:]
+            new_uids = [u for u in uids_to_fetch if int(u) not in existing]
 
             log.info(f'Pasta {folder}: {len(all_uids)} total, {len(new_uids)} novos')
 
             if not new_uids:
                 conn.logout()
-                return 0
+                return
 
-            # Fetch otimizado: apenas headers primeiro (BODY.PEEK evita marcar como lido)
             uid_str = ','.join(u.decode() for u in new_uids)
-            _, msg_data = conn.uid(
-                'fetch', uid_str,
-                '(UID FLAGS BODY.PEEK[])'
-            )
+            _, msg_data = conn.uid('fetch', uid_str, '(RFC822 FLAGS)')
 
-            batch_objects = []
-            batch_attachments = []
             i = 0
-
             while i < len(msg_data):
                 item = msg_data[i]
                 if not isinstance(item, tuple):
                     i += 1
                     continue
-
-                meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
-                raw  = item[1]
-
+                meta = item[0].decode() if isinstance(item[0], bytes) else item[0]
+                raw = item[1]
                 uid_match = re.search(r'UID (\d+)', meta)
                 if not uid_match:
                     i += 1
                     continue
-
-                uid     = int(uid_match.group(1))
+                uid = int(uid_match.group(1))
                 is_read = '\\Seen' in meta
 
                 try:
-                    # Usa email.policy.default para melhor suporte a encoding
-                    msg = email_lib.message_from_bytes(raw, policy=email_policy.compat32)
-
-                    subject   = _decode_header_value(msg.get('Subject', ''))
+                    msg = email_lib.message_from_bytes(raw)
+                    subject = _decode_header_value(msg.get('Subject', ''))
                     from_full = _decode_header_value(msg.get('From', ''))
                     from_name, from_addr = parseaddr(from_full)
-                    to_addr   = _decode_header_value(msg.get('To', ''))
-                    cc_addr   = _decode_header_value(msg.get('Cc', ''))
-                    reply_to  = _decode_header_value(msg.get('Reply-To', ''))
-                    message_id  = (msg.get('Message-ID') or '').strip()
-                    in_reply_to = (msg.get('In-Reply-To') or '').strip()
+                    to_addr = _decode_header_value(msg.get('To', ''))
+                    cc_addr = _decode_header_value(msg.get('Cc', ''))
+                    reply_to = _decode_header_value(msg.get('Reply-To', ''))
+                    message_id = msg.get('Message-ID', '').strip()
+                    in_reply_to = msg.get('In-Reply-To', '').strip()
 
                     date_str = msg.get('Date', '')
                     try:
@@ -295,87 +253,37 @@ class MailService:
                     att_data = _get_attachments(msg)
 
                     email_obj = Email(
-                        account_id=account.id,
-                        folder=folder,
-                        uid=uid,
-                        message_id=message_id,
-                        in_reply_to=in_reply_to,
+                        account_id=account.id, folder=folder, uid=uid,
+                        message_id=message_id, in_reply_to=in_reply_to,
                         subject=subject or '(sem assunto)',
-                        from_addr=from_addr,
-                        from_name=from_name,
-                        to_addr=to_addr,
-                        cc_addr=cc_addr,
-                        reply_to=reply_to,
-                        date=date,
-                        body_text=body_text,
-                        body_html=body_html,
-                        is_read=is_read,
-                        has_attachments=bool(att_data),
+                        from_addr=from_addr, from_name=from_name,
+                        to_addr=to_addr, cc_addr=cc_addr, reply_to=reply_to,
+                        date=date, body_text=body_text, body_html=body_html,
+                        is_read=is_read, has_attachments=len(att_data) > 0,
                     )
-                    batch_objects.append((email_obj, att_data))
-                    new_count += 1
+                    _db.session.add(email_obj)
+                    _db.session.flush()
 
-                    # Commit em lote a cada BATCH_SIZE emails
-                    if len(batch_objects) >= BATCH_SIZE:
-                        self._flush_batch(_db, account, batch_objects)
-                        batch_objects = []
+                    for a in att_data:
+                        _db.session.add(Attachment(
+                            email_id=email_obj.id, filename=a['filename'],
+                            content_type=a['content_type'], size=a['size'], data=a['data'],
+                        ))
 
-                except Exception as e:
-                    log.warning(f'Error parsing email UID {uid}: {e}')
-
-                i += 1
-
-            # Flush do restante
-            if batch_objects:
-                self._flush_batch(_db, account, batch_objects)
-
-            conn.logout()
-
-        except Exception as e:
-            log.error(f'_sync_folder {folder} error: {e}')
-            try:
-                _db.session.rollback()
-            except Exception:
-                pass
-
-        return new_count
-
-    def _flush_batch(self, _db, account, batch):
-        """Persiste um lote de emails de uma vez."""
-        try:
-            for email_obj, att_data in batch:
-                _db.session.add(email_obj)
-            _db.session.flush()  # gera IDs sem commitar
-
-            for email_obj, att_data in batch:
-                for a in att_data:
-                    _db.session.add(Attachment(
-                        email_id=email_obj.id,
-                        filename=a['filename'],
-                        content_type=a['content_type'],
-                        size=a['size'],
-                        data=a['data'],
-                    ))
-
-            _db.session.commit()
-
-            # Emite evento só para novos emails do INBOX
-            for email_obj, _ in batch:
-                if email_obj.folder.upper() == 'INBOX':
+                    _db.session.commit()
                     self._emit('new_email', {
                         'account_id': account.id,
-                        'folder': email_obj.folder,
+                        'folder': folder,
                         'email': email_obj.to_list_dict(),
                     })
+                except Exception as e:
+                    _db.session.rollback()
+                    log.warning(f'Error parsing email UID {uid}: {e}')
+                i += 1
 
+            conn.logout()
         except Exception as e:
-            log.error(f'_flush_batch error: {e}')
-            try:
-                _db.session.rollback()
-            except Exception:
-                pass
-
-    # ── Server-side flags ──────────────────────────────────────────────────────
+            log.error(f'_sync_folder {folder} error: {e}')
 
     def mark_read_on_server(self, email_obj: Email):
         try:
@@ -396,19 +304,20 @@ class MailService:
             log.warning(f'mark_unread_on_server error: {e}')
 
     def set_spam(self, email_obj: Email, mark_as_spam: bool):
+        """Move para spam ou devolve para INBOX."""
         from database import db as _db
         try:
             account = email_obj.account
             if mark_as_spam:
-                target = self._find_folder(account, ['spam', 'junk'])
+                target = self._find_spam_folder(account)
                 if not target:
                     log.warning('Pasta de spam não encontrada')
                     return False
             else:
-                target = 'INBOX'
+                target = self._find_inbox_folder(account)
 
             if email_obj.folder.lower() == target.lower():
-                return True
+                return True  # já está na pasta certa
 
             conn = self._imap_connect(account)
             conn.select(f'"{email_obj.folder}"')
@@ -452,17 +361,17 @@ class MailService:
                    subject: str, body: str, reply_to_id=None, attachments=None):
         try:
             msg = MIMEMultipart('mixed')
-            msg['From']    = f'{account.name} <{account.email}>'
-            msg['To']      = to
+            msg['From'] = f'{account.name} <{account.email}>'
+            msg['To'] = to
             if cc:
-                msg['Cc']  = cc
+                msg['Cc'] = cc
             msg['Subject'] = subject
 
             if reply_to_id:
                 orig = Email.query.get(reply_to_id)
                 if orig and orig.message_id:
                     msg['In-Reply-To'] = orig.message_id
-                    msg['References']  = orig.message_id
+                    msg['References'] = orig.message_id
 
             msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
@@ -493,10 +402,10 @@ class MailService:
             s.sendmail(account.email, recipients, msg.as_string())
             s.quit()
 
-            # Salva na pasta Sent via IMAP
             try:
                 conn = self._imap_connect(account)
-                sent_folder = self._find_folder(account, ['sent'])
+                folders = self.get_folders(account)
+                sent_folder = next((f for f in folders if 'sent' in f.lower()), None)
                 if sent_folder:
                     conn.append(f'"{sent_folder}"', '\\Seen', None, msg.as_bytes())
                 conn.logout()
