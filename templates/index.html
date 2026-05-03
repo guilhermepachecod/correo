@@ -14,15 +14,17 @@
 
   <!-- ══ SIDEBAR ══ -->
   <div id="sidebar">
-    <div id="sidebar-top">
-      <button id="compose-btn" onclick="openCompose()">✏️ Escrever</button>
-      <button id="sync-all-btn" onclick="syncAll()" title="Sincronizar tudo">↻</button>
+    <div id="sidebar-header">
+      <div class="logo">cor<span>reo</span></div>
     </div>
-
-    <div id="account-tree"></div>
-
+    <button id="compose-btn" onclick="openCompose()">✏️ Escrever</button>
+    <select id="account-select" onchange="onAccountChange()">
+      <option value="">Todas as contas</option>
+    </select>
+    <div id="folders"></div>
     <div id="sidebar-footer">
-      <div class="sidebar-action" onclick="openAccountModal()">⚙ Gerenciar contas</div>
+      <div class="sidebar-action" onclick="syncAll()">↻ Sincronizar</div>
+      <div class="sidebar-action" onclick="openAccountModal()">⚙ Contas</div>
       <div class="sidebar-divider"></div>
       <div class="sidebar-setting">
         <span class="sidebar-setting-label">Tema</span>
@@ -46,17 +48,17 @@
     </div>
   </div>
 
-  <!-- ══ MAIN PANEL ══ -->
+  <!-- ══ MAIN PANEL (lista + divisória + viewer) ══ -->
   <div id="main-panel" data-layout="vertical">
 
     <!-- Lista de emails -->
     <div id="email-list-panel">
-      <div id="list-toolbar">
+      <div id="list-header">
         <div id="search-wrap">
           <span class="search-icon">🔍</span>
           <input id="search-input" type="text" placeholder="Buscar..." oninput="debounceSearch()" autocomplete="off">
         </div>
-        <button id="sync-btn" onclick="syncCurrent()" title="Sincronizar pasta">↻</button>
+        <button id="sync-btn" onclick="syncCurrent()" title="Sincronizar">↻</button>
       </div>
 
       <div id="list-actions">
@@ -77,21 +79,6 @@
         <button class="bulk-btn" onclick="deselectAll()" style="margin-left:auto">✕ Cancelar</button>
       </div>
 
-      <!-- Header de colunas (tabela) -->
-      <div id="email-list-header">
-        <div class="elh-col" style="cursor:default"></div>
-        <div class="elh-col" style="cursor:default">⚑ 📎</div>
-        <div class="elh-col" id="sort-from" onclick="setSortBy('from')">
-          Remetente <span class="sort-arrow" id="sort-from-arrow"></span>
-        </div>
-        <div class="elh-col" id="sort-subject" onclick="setSortBy('subject')">
-          Assunto <span class="sort-arrow" id="sort-subject-arrow"></span>
-        </div>
-        <div class="elh-col" id="sort-date" onclick="setSortBy('date')" style="justify-content:flex-end">
-          Data <span class="sort-arrow" id="sort-date-arrow">▼</span>
-        </div>
-      </div>
-
       <div id="email-list">
         <div id="list-loading" style="display:flex"><div class="spinner"></div> Carregando...</div>
         <div id="list-empty" style="display:none">📭 Nenhum e-mail</div>
@@ -101,34 +88,14 @@
     <!-- Divisória arrastável -->
     <div id="resize-handle" onmousedown="startResize(event)"></div>
 
-    <!-- Viewer -->
+    <!-- Viewer de email -->
     <div id="reading-pane">
       <div id="reading-empty" class="reading-empty">
         <div class="reading-empty-icon">✉</div>
-        <div style="font-size:12px">Selecione um e-mail para ler</div>
+        <div style="font-size:13px">Selecione um e-mail para ler</div>
       </div>
 
       <div id="email-view">
-        <!-- Toolbar de ações -->
-        <div id="ev-toolbar">
-          <button class="ev-btn" onclick="replyEmail()">↩ Responder</button>
-          <button class="ev-btn" onclick="replyAll()">↩↩ Resp. todos</button>
-          <button class="ev-btn" onclick="forwardEmail()">→ Encaminhar</button>
-          <button class="ev-btn" onclick="forwardAsAttachment()">📎 Enc. como anexo</button>
-          <button class="ev-btn" onclick="editAsNew()">✏ Editar como novo</button>
-          <button class="ev-btn" onclick="printEmail()">🖨 Imprimir</button>
-          <div class="ev-sep"></div>
-          <button class="ev-btn" id="ev-star-btn" onclick="toggleStar()">☆ Marcar</button>
-          <button class="ev-btn" onclick="markUnread()">✉ Não lido</button>
-          <button class="ev-btn" id="ev-spam-btn" onclick="toggleSpam()">⚠ Spam</button>
-          <button class="ev-btn danger" onclick="deleteEmail()">🗑 Excluir</button>
-          <div class="ev-sep"></div>
-          <button class="ev-btn" id="ev-img-btn" onclick="toggleEmailImages()">🖼 Imgs: OFF</button>
-          <button class="ev-btn active-toggle" id="ev-html-btn" onclick="setEmailViewMode('html')">HTML</button>
-          <button class="ev-btn" id="ev-txt-btn" onclick="setEmailViewMode('text')">Texto</button>
-        </div>
-
-        <!-- Cabeçalho do email -->
         <div id="ev-header">
           <div id="ev-subject"></div>
           <div id="ev-meta">
@@ -138,16 +105,28 @@
               <div id="ev-from-addr"></div>
               <div id="ev-to-line"></div>
             </div>
-            <div id="ev-date-meta"></div>
+            <div id="ev-date"></div>
           </div>
-        </div>
-
-        <!-- Banner de junk -->
-        <div id="ev-junk-banner">
-          <span>🔥</span>
-          <span class="junk-banner-text">Este e-mail foi identificado como Spam.</span>
-          <button class="junk-banner-btn" onclick="toggleSpam()">✓ Não é spam</button>
-          <button class="junk-banner-close" onclick="document.getElementById('ev-junk-banner').classList.remove('visible')">×</button>
+          <!-- Linha 1: ações de navegação -->
+          <div class="ev-actions-row">
+            <button class="ev-btn" onclick="replyEmail()">↩ Responder</button>
+            <button class="ev-btn" onclick="replyAll()">↩↩ Resp. todos</button>
+            <button class="ev-btn" onclick="forwardEmail()">→ Encaminhar</button>
+            <button class="ev-btn" onclick="forwardAsAttachment()">📎 Enc. como anexo</button>
+            <button class="ev-btn" onclick="editAsNew()">✏ Editar como novo</button>
+            <button class="ev-btn" onclick="printEmail()">🖨 Imprimir</button>
+          </div>
+          <!-- Linha 2: status + view controls -->
+          <div class="ev-actions-row">
+            <button class="ev-btn" id="ev-star-btn" onclick="toggleStar()">☆ Marcar</button>
+            <button class="ev-btn" onclick="markUnread()">✉ Não lido</button>
+            <button class="ev-btn" id="ev-spam-btn" onclick="toggleSpam()">⚠ Spam</button>
+            <button class="ev-btn danger" onclick="deleteEmail()">🗑 Excluir</button>
+            <div class="la-sep" style="margin: 0 4px"></div>
+            <button class="ev-btn" id="ev-img-btn" onclick="toggleEmailImages()">🖼 Imagens: OFF</button>
+            <button class="ev-btn active-toggle" id="ev-html-btn" onclick="setEmailViewMode('html')">HTML</button>
+            <button class="ev-btn" id="ev-txt-btn" onclick="setEmailViewMode('text')">Texto</button>
+          </div>
         </div>
 
         <div id="ev-attachments"></div>
@@ -172,13 +151,15 @@
     <div id="compose-fields">
       <div class="compose-field">
         <span class="compose-label">De</span>
-        <select id="compose-account-select" style="flex:1;background:var(--bg3);border:1px solid var(--line);border-radius:4px;color:var(--text);font-family:var(--font);font-size:12px;padding:4px 7px;outline:none;"></select>
+        <select id="compose-account-select" style="flex:1;background:var(--bg3);border:1px solid var(--line);border-radius:8px;color:var(--text);font-family:var(--font);font-size:13px;padding:5px 8px;outline:none;"></select>
       </div>
       <div class="compose-field"><span class="compose-label">Para</span><input class="compose-input" id="compose-to" type="text" placeholder="destinatario@email.com"></div>
       <div class="compose-field"><span class="compose-label">Cc</span><input class="compose-input" id="compose-cc" type="text"></div>
       <div class="compose-field"><span class="compose-label">Assunto</span><input class="compose-input" id="compose-subject" type="text" placeholder="Assunto"></div>
     </div>
-    <div id="compose-body-wrap"><textarea id="compose-body" placeholder="Escreva sua mensagem..."></textarea></div>
+    <div id="compose-body-wrap">
+      <textarea id="compose-body" placeholder="Escreva sua mensagem..."></textarea>
+    </div>
     <div id="compose-footer">
       <button id="compose-send-btn" onclick="sendEmail()">Enviar</button>
       <button class="compose-attach-btn" onclick="document.getElementById('compose-file-input').click()">📎 Anexar</button>
@@ -195,32 +176,32 @@
     <div id="account-box-body">
       <div id="account-list"></div>
       <hr class="form-divider">
-      <div style="margin-bottom:14px;">
+      <div style="margin-bottom:16px;">
         <button id="sync-conf-btn" onclick="syncConf()">⟳ Ler arquivos .conf</button>
-        <div class="conf-hint">Lê os arquivos em <code>/app/accounts/*.conf</code> e sincroniza com o banco.</div>
+        <div class="conf-hint">Lê os arquivos em <code>/app/accounts/*.conf</code> e sincroniza com o banco.<br>Cada arquivo representa uma conta. Ex: <code>pessoal.conf</code></div>
       </div>
       <hr class="form-divider">
-      <h2 id="account-form-title" style="margin-bottom:14px;font-size:13px;">Adicionar conta</h2>
+      <h2 id="account-form-title" style="margin-bottom:16px;font-size:14px;">Adicionar conta</h2>
       <div class="form-group">
-        <label class="form-label">Nome de exibição <span style="color:var(--muted);font-size:10px;">(nome do .conf)</span></label>
+        <label class="form-label">Nome de exibição <span style="color:var(--muted);font-size:11px;">(nome do .conf)</span></label>
         <input class="form-input" id="af-name" type="text" placeholder="pessoal">
       </div>
       <div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="af-email" type="email" placeholder="voce@email.com"></div>
       <div class="form-group"><label class="form-label">Usuário (login)</label><input class="form-input" id="af-username" type="text" placeholder="geralmente o próprio e-mail"></div>
       <div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="af-password" type="password" placeholder="senha ou app password"></div>
       <hr class="form-divider">
-      <div style="margin-bottom:8px;font-size:11px;color:var(--muted);">IMAP (recebimento)</div>
+      <div style="margin-bottom:10px;font-size:12px;color:var(--muted);">IMAP (recebimento)</div>
       <div class="form-row form-group">
         <input class="form-input" id="af-imap-host" type="text" placeholder="imap.seuserver.com">
         <input class="form-input" id="af-imap-port" type="number" placeholder="993">
       </div>
       <label class="form-check form-group"><input type="checkbox" id="af-imap-ssl" checked> SSL/TLS</label>
-      <div style="margin-bottom:8px;font-size:11px;color:var(--muted);">SMTP (envio)</div>
+      <div style="margin-bottom:10px;font-size:12px;color:var(--muted);">SMTP (envio)</div>
       <div class="form-row form-group">
         <input class="form-input" id="af-smtp-host" type="text" placeholder="smtp.seuserver.com">
         <input class="form-input" id="af-smtp-port" type="number" placeholder="587">
       </div>
-      <div style="display:flex;gap:14px;" class="form-group">
+      <div style="display:flex;gap:16px;" class="form-group">
         <label class="form-check"><input type="checkbox" id="af-smtp-ssl"> SSL</label>
         <label class="form-check"><input type="checkbox" id="af-smtp-tls" checked> STARTTLS</label>
       </div>
