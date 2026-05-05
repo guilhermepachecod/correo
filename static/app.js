@@ -283,9 +283,9 @@ const FOLDER_DEFS = [
 ];
 
 function getAccountUnread(accountId) {
+  // Badge da conta = não lidos de TODAS as pastas exceto sent/drafts
   const data = folderCountsData[accountId] || {};
-  // Soma apenas pastas que são inbox (exclui sent, drafts, spam, trash, archive)
-  const EXCLUDE = ['sent', 'draft', 'spam', 'junk', 'trash', 'lixeira', 'archive'];
+  const EXCLUDE = ['sent', 'draft'];
   return Object.entries(data).reduce((s, [folder, c]) => {
     const f = folder.toLowerCase();
     if (EXCLUDE.some(kw => f.includes(kw))) return s;
