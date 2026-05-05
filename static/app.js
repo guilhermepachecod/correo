@@ -284,7 +284,13 @@ const FOLDER_DEFS = [
 
 function getAccountUnread(accountId) {
   const data = folderCountsData[accountId] || {};
-  return Object.values(data).reduce((s, c) => s + (c.unread || 0), 0);
+  // Soma apenas pastas que são inbox (exclui sent, drafts, spam, trash, archive)
+  const EXCLUDE = ['sent', 'draft', 'spam', 'junk', 'trash', 'lixeira', 'archive'];
+  return Object.entries(data).reduce((s, [folder, c]) => {
+    const f = folder.toLowerCase();
+    if (EXCLUDE.some(kw => f.includes(kw))) return s;
+    return s + (c.unread || 0);
+  }, 0);
 }
 
 function renderAccountTree() {
