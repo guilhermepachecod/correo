@@ -3,11 +3,10 @@ const state = {
   accounts: [],
   selectedAccountId: null,
   selectedFolder: 'INBOX',
-  selectedFolderReal: null, // pasta real no servidor
+  selectedFolderReals: null,
   emails: [],
   selectedEmailId: null,
   currentPage: 1,
-  totalPages: 1,
   searchQuery: '',
   replyToId: null,
   editAccountId: null,
@@ -18,25 +17,27 @@ const state = {
   currentEmail: null,
   sortBy: 'date',
   sortDir: 'desc',
+  // sync state por conta
+  syncErrors: {},       // accountId -> errorMessage
+  syncingIds: new Set(),// accountIds atualmente sincronizando
+  lastSyncTime: {},     // accountId -> timestamp (ms)
 };
+
+const MIN_SYNC_GAP_MS = 5 * 60 * 1000; // 5 min entre syncs automáticos
 
 // ── Settings ───────────────────────────────────────────────────────────────────
 const settings = {
   theme: 'dark',
   layout: 'vertical',
   showImagesByDefault: false,
-  autoSync: 0,
   splitSize: 320,
-  collapsedAccounts: {}, // { accountId: true/false }
+  collapsedAccounts: {},
+  autoSyncMin: 0,  // 0 = desligado
 };
 
 function loadSettings() {
   try { Object.assign(settings, JSON.parse(localStorage.getItem('correo_settings') || '{}')); } catch(e) {}
-  applyTheme();
-  applyLayout();
-  applySplit();
-  updateSettingsUI();
-  if (settings.autoSync > 0) startAutoSync();
+  applyTheme(); applyLayout(); applySplit(); updateSettingsUI();
 }
 function saveSettings() { localStorage.setItem('correo_settings', JSON.stringify(settings)); }
 
@@ -50,16 +51,12 @@ function toggleTheme() { settings.theme = settings.theme === 'dark' ? 'light' : 
 
 // ── Layout ─────────────────────────────────────────────────────────────────────
 function applyLayout() {
-  const panel = document.getElementById('main-panel');
-  panel.setAttribute('data-layout', settings.layout);
+  document.getElementById('main-panel').setAttribute('data-layout', settings.layout);
   applySplit();
   const btn = document.getElementById('toggle-layout');
   if (btn) btn.textContent = settings.layout === 'vertical' ? '⇔ Horizontal' : '⇕ Vertical';
 }
-function toggleLayout() {
-  settings.layout = settings.layout === 'vertical' ? 'horizontal' : 'vertical';
-  saveSettings(); applyLayout();
-}
+function toggleLayout() { settings.layout = settings.layout === 'vertical' ? 'horizontal' : 'vertical'; saveSettings(); applyLayout(); }
 
 // ── Split resize ───────────────────────────────────────────────────────────────
 function applySplit() {
@@ -101,41 +98,143 @@ document.addEventListener('mouseup', () => {
 });
 window.addEventListener('resize', applySplit);
 
-// ── Auto-sync ──────────────────────────────────────────────────────────────────
-let autoSyncTimer = null;
-function startAutoSync() {
-  stopAutoSync();
-  if (settings.autoSync <= 0) return;
-  autoSyncTimer = setInterval(() => fetch('/api/sync/all', { method: 'POST' }), settings.autoSync * 60 * 1000);
-}
-function stopAutoSync() { if (autoSyncTimer) { clearInterval(autoSyncTimer); autoSyncTimer = null; } }
-function setAutoSync(val) {
-  settings.autoSync = parseInt(val); saveSettings();
-  if (settings.autoSync > 0) { startAutoSync(); toast(`Auto-sync a cada ${settings.autoSync} min`, 'success'); }
-  else { stopAutoSync(); toast('Auto-sync desativado', 'info'); }
-}
 function updateSettingsUI() {
-  applyTheme(); applyLayout();
+  applyTheme();
+  applyLayout();
   const sel = document.getElementById('autosync-select');
-  if (sel) sel.value = settings.autoSync;
+  if (sel) sel.value = String(settings.autoSyncMin || 0);
+}
+
+// ── Auto-sync ──────────────────────────────────────────────────────────────────
+let _autoSyncTimer = null;
+
+function setAutoSync(val) {
+  settings.autoSyncMin = parseInt(val) || 0;
+  saveSettings();
+  _startAutoSync();
+}
+
+function _startAutoSync() {
+  if (_autoSyncTimer) { clearInterval(_autoSyncTimer); _autoSyncTimer = null; }
+  if (!settings.autoSyncMin || settings.autoSyncMin <= 0) return;
+  const ms = settings.autoSyncMin * 60 * 1000;
+  _autoSyncTimer = setInterval(() => {
+    // Sync silencioso: não mostra spinner nem bloqueia UI
+    _silentSyncAll();
+  }, ms);
+  log.debug(`Auto-sync ativado: a cada ${settings.autoSyncMin} min`);
+}
+
+async function _silentSyncAll() {
+  // Só sincroniza contas sem erro e que não estão em andamento
+  for (const acc of state.accounts) {
+    if (!state.syncErrors[acc.id] && !state.syncingIds.has(acc.id)) {
+      await fetch(`/api/accounts/${acc.id}/sync`, { method: 'POST' });
+    }
+  }
 }
 
 // ── Socket.IO ──────────────────────────────────────────────────────────────────
 const socket = io();
-socket.on('sync_start', d => toast(`↺ Sincronizando ${d.email}...`, 'info'));
-socket.on('sync_done',  d => { toast(`✓ ${d.email} sincronizado${d.new ? ` (${d.new} novos)` : ''}`, 'success'); loadEmails(); renderAccountTree(); });
-socket.on('sync_error', d => toast(`Erro: ${d.error}`, 'error'));
-socket.on('new_email',  d => { if (d.account_id === state.selectedAccountId || !state.selectedAccountId) { loadEmails(); renderAccountTree(); } });
+
+socket.on('sync_start', d => {
+  state.syncingIds.add(d.account_id);
+  renderAccountTree();
+});
+
+socket.on('sync_done', d => {
+  state.syncingIds.delete(d.account_id);
+  state.syncErrors[d.account_id] = null;
+  state.lastSyncTime[d.account_id] = Date.now();
+  renderAccountTree();
+  if (!state.selectedAccountId || state.selectedAccountId === d.account_id) {
+    loadEmails();
+    refreshFolderCounts();
+  }
+  if (d.new && d.new > 0) {
+    showSyncNotification(`${d.new} nova${d.new > 1 ? 's' : ''} mensagem${d.new > 1 ? 'ns' : ''} em ${d.email}`);
+  }
+  if (d.flag_changes && d.flag_changes > 0) {
+    log.debug(`${d.flag_changes} flags atualizadas em ${d.email}`);
+  }
+});
+
+socket.on('sync_error', d => {
+  state.syncingIds.delete(d.account_id);
+  state.syncErrors[d.account_id] = d.error;
+  renderAccountTree();
+  showSyncNotification(`Erro ao sincronizar: verifique a conta`, 'error');
+});
+
+socket.on('new_email', d => {
+  if (!state.selectedAccountId || d.account_id === state.selectedAccountId) {
+    loadEmails();
+    refreshFolderCounts();
+  }
+});
+
+// Atualização incremental de flags sem recarregar tudo
+socket.on('flags_updated', d => {
+  if (!state.selectedAccountId || d.account_id === state.selectedAccountId) {
+    let changed = false;
+    for (const upd of (d.updates || [])) {
+      const email = state.emails.find(e => e.id === upd.id);
+      if (email && email.is_read !== upd.is_read) {
+        email.is_read = upd.is_read;
+        changed = true;
+        // Atualiza item na DOM sem re-renderizar tudo
+        _patchEmailItem(upd.id, { is_read: upd.is_read });
+      }
+    }
+    if (changed) refreshFolderCounts();
+  }
+});
+
+// Patch cirúrgico de uma linha na lista (sem re-render completo)
+function _patchEmailItem(emailId, changes) {
+  const item = document.querySelector(`.email-item[data-id="${emailId}"]`);
+  if (!item) return;
+  if ('is_read' in changes) {
+    item.classList.toggle('unread', !changes.is_read);
+    const dot = item.querySelector('.dot-unread, .dot-read');
+    if (dot) {
+      dot.className = changes.is_read ? 'dot-read' : 'dot-unread';
+    }
+  }
+  if ('is_starred' in changes) {
+    const star = item.querySelector('.icon-star');
+    if (star) star.classList.toggle('starred', changes.is_starred);
+  }
+}
+
+// ── Notificação de sync ────────────────────────────────────────────────────────
+let notifTimer = null;
+function showSyncNotification(msg, type = 'info') {
+  const el = document.getElementById('sync-notif');
+  if (!el) return;
+  el.textContent = msg;
+  el.className   = `sync-notif visible ${type}`;
+  clearTimeout(notifTimer);
+  notifTimer = setTimeout(() => el.classList.remove('visible'), 5000);
+}
+
+// ── Debug logger ───────────────────────────────────────────────────────────────
+const log = {
+  debug: (...args) => console.debug('[correo]', ...args),
+  info:  (...args) => console.info('[correo]',  ...args),
+  warn:  (...args) => console.warn('[correo]',  ...args),
+};
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 async function init() {
   loadSettings();
+  _startAutoSync();
   await loadAccounts();
   await loadEmails();
 }
 
 // ── Accounts ───────────────────────────────────────────────────────────────────
-let folderCountsData = {}; // { accountId: { folderName: { total, unread } } }
+let folderCountsData = {}; // { accountId: { realFolder: { total, unread } } }
 
 async function loadAccounts() {
   const res = await fetch('/api/accounts');
@@ -148,14 +247,19 @@ async function loadAccounts() {
 
 async function loadAllFolderCounts() {
   folderCountsData = {};
-  for (const acc of state.accounts) {
+  await Promise.all(state.accounts.map(async acc => {
     try {
       const res = await fetch(`/api/folders/counts?account_id=${acc.id}`);
       folderCountsData[acc.id] = await res.json();
     } catch(e) {
       folderCountsData[acc.id] = {};
     }
-  }
+  }));
+}
+
+async function refreshFolderCounts() {
+  await loadAllFolderCounts();
+  renderAccountTree();
 }
 
 function renderComposeAccountSelect() {
@@ -167,30 +271,20 @@ function renderComposeAccountSelect() {
   }
 }
 
-// ── Account tree (sidebar Thunderbird-style) ───────────────────────────────────
+// ── Account tree ───────────────────────────────────────────────────────────────
 
 const FOLDER_DEFS = [
-  { key: 'inbox',  label: 'Entrada',    icon: '📥', keywords: ['inbox'] },
-  { key: 'drafts', label: 'Rascunhos',  icon: '📝', keywords: ['draft'] },
-  { key: 'sent',   label: 'Enviados',   icon: '📤', keywords: ['sent'] },
-  { key: 'spam',   label: 'Spam',       icon: '🔥', keywords: ['spam', 'junk'] },
-  { key: 'trash',  label: 'Lixeira',    icon: '🗑',  keywords: ['trash'] },
-  { key: 'archive',label: 'Arquivo',    icon: '📦', keywords: ['archive'] },
+  { key: 'inbox',   label: 'Entrada',   icon: '📥', keywords: ['inbox'] },
+  { key: 'drafts',  label: 'Rascunhos', icon: '📝', keywords: ['draft'] },
+  { key: 'sent',    label: 'Enviados',  icon: '📤', keywords: ['sent'] },
+  { key: 'spam',    label: 'Spam',      icon: '🔥', keywords: ['spam', 'junk'] },
+  { key: 'trash',   label: 'Lixeira',   icon: '🗑',  keywords: ['trash'] },
+  { key: 'archive', label: 'Arquivo',   icon: '📦', keywords: ['archive'] },
 ];
-
-function matchFolderDef(realName) {
-  const k = realName.toLowerCase();
-  return FOLDER_DEFS.find(d => d.keywords.some(kw => k.includes(kw)));
-}
-
-function getFolderCounts(accountId, realFolder) {
-  const data = folderCountsData[accountId] || {};
-  return data[realFolder] || { total: 0, unread: 0 };
-}
 
 function getAccountUnread(accountId) {
   const data = folderCountsData[accountId] || {};
-  return Object.values(data).reduce((sum, c) => sum + (c.unread || 0), 0);
+  return Object.values(data).reduce((s, c) => s + (c.unread || 0), 0);
 }
 
 function renderAccountTree() {
@@ -198,70 +292,74 @@ function renderAccountTree() {
   container.innerHTML = '';
 
   for (const acc of state.accounts) {
-    const counts = folderCountsData[acc.id] || {};
+    const counts      = folderCountsData[acc.id] || {};
     const totalUnread = getAccountUnread(acc.id);
     const isCollapsed = settings.collapsedAccounts[acc.id] || false;
+    const hasError    = !!state.syncErrors[acc.id];
+    const isSyncing   = state.syncingIds.has(acc.id);
 
     const node = document.createElement('div');
     node.className = 'account-node' + (isCollapsed ? ' collapsed' : '');
     node.dataset.accId = acc.id;
 
-    // Header da conta
     const header = document.createElement('div');
-    header.className = 'account-header';
+    header.className = 'account-header' + (hasError ? ' has-error' : '') + (isSyncing ? ' is-syncing' : '');
+    header.title = hasError ? `Erro: ${state.syncErrors[acc.id]}` : '';
     header.innerHTML = `
       <span class="account-toggle">▾</span>
-      <span class="account-icon">✉</span>
+      <span class="account-icon">${isSyncing ? '<span class="mini-spinner"></span>' : hasError ? '⚠' : '✉'}</span>
       <span class="account-email" title="${esc(acc.email)}">${esc(acc.email)}</span>
       ${totalUnread > 0 ? `<span class="account-badge">${totalUnread}</span>` : ''}
+      ${hasError ? '<span class="account-error-dot"></span>' : ''}
     `;
     header.onclick = () => toggleAccountCollapse(acc.id, node);
 
-    // Pastas
+    if (hasError) {
+      const retryBtn = document.createElement('button');
+      retryBtn.className = 'account-retry-btn';
+      retryBtn.textContent = '↻';
+      retryBtn.title = 'Tentar novamente';
+      retryBtn.onclick = e => { e.stopPropagation(); manualSyncAccount(acc.id); };
+      header.appendChild(retryBtn);
+    }
+
     const foldersDiv = document.createElement('div');
     foldersDiv.className = 'account-folders';
+    if (!isCollapsed) foldersDiv.style.maxHeight = '500px';
 
-    // Monta lista de pastas reais agrupadas em virtuais
-    const seen = new Set();
-    const orderedDefs = [...FOLDER_DEFS];
+    const seen           = new Set();
+    const realFolderKeys = Object.keys(counts);
 
-    // Primeiro adiciona as pastas que temos contagens
-    const realFolders = Object.keys(counts);
+    for (const def of FOLDER_DEFS) {
+      const matching = realFolderKeys.filter(f => def.keywords.some(kw => f.toLowerCase().includes(kw)));
+      matching.forEach(f => seen.add(f));
 
-    for (const def of orderedDefs) {
-      // Encontra pastas reais que correspondem a essa def
-      const matching = realFolders.filter(f => def.keywords.some(kw => f.toLowerCase().includes(kw)));
-      if (matching.length === 0) continue;
-
-      const totalC = matching.reduce((s, f) => s + (counts[f]?.total || 0), 0);
+      const totalC  = matching.reduce((s, f) => s + (counts[f]?.total  || 0), 0);
       const unreadC = matching.reduce((s, f) => s + (counts[f]?.unread || 0), 0);
-      if (totalC === 0 && def.key !== 'inbox') { matching.forEach(f => seen.add(f)); continue; }
 
-      const primaryReal = matching[0];
-      seen.add(...matching);
+      if (totalC === 0 && def.key !== 'inbox') continue;
 
+      const realList = matching.length ? matching : (def.key === 'inbox' ? ['INBOX'] : []);
+
+      const isActive = state.selectedAccountId === acc.id && state.selectedFolder === def.key;
       const folderEl = document.createElement('div');
-      folderEl.className = 'folder-item' + (
-        state.selectedAccountId === acc.id && state.selectedFolder === def.key ? ' active' : ''
-      );
+      folderEl.className = 'folder-item' + (isActive ? ' active' : '');
       folderEl.innerHTML = `
         <span class="folder-icon">${def.icon}</span>
         <span class="folder-name">${def.label}</span>
         ${unreadC > 0 ? `<span class="folder-badge">${unreadC}</span>` : ''}
       `;
-      folderEl.onclick = () => selectFolder(acc.id, def.key, matching);
+      folderEl.onclick = () => selectFolder(acc.id, def.key, realList);
       foldersDiv.appendChild(folderEl);
     }
 
-    // Pastas extras não mapeadas
-    for (const real of realFolders) {
+    for (const real of realFolderKeys) {
       if (seen.has(real)) continue;
       const c = counts[real] || { total: 0, unread: 0 };
       if (c.total === 0) continue;
+      const isActive = state.selectedAccountId === acc.id && state.selectedFolder === real;
       const folderEl = document.createElement('div');
-      folderEl.className = 'folder-item' + (
-        state.selectedAccountId === acc.id && state.selectedFolder === real ? ' active' : ''
-      );
+      folderEl.className = 'folder-item' + (isActive ? ' active' : '');
       folderEl.innerHTML = `
         <span class="folder-icon">📁</span>
         <span class="folder-name">${esc(real)}</span>
@@ -269,21 +367,6 @@ function renderAccountTree() {
       `;
       folderEl.onclick = () => selectFolder(acc.id, real, [real]);
       foldersDiv.appendChild(folderEl);
-    }
-
-    // Garante pelo menos INBOX mesmo sem contagens
-    if (foldersDiv.children.length === 0) {
-      const def = FOLDER_DEFS[0];
-      const folderEl = document.createElement('div');
-      folderEl.className = 'folder-item' + (state.selectedAccountId === acc.id && state.selectedFolder === 'inbox' ? ' active' : '');
-      folderEl.innerHTML = `<span class="folder-icon">${def.icon}</span><span class="folder-name">${def.label}</span>`;
-      folderEl.onclick = () => selectFolder(acc.id, def.key, ['INBOX']);
-      foldersDiv.appendChild(folderEl);
-    }
-
-    // Altura para animação
-    if (!isCollapsed) {
-      foldersDiv.style.maxHeight = '500px';
     }
 
     node.appendChild(header);
@@ -297,38 +380,77 @@ function renderAccountTree() {
 }
 
 function toggleAccountCollapse(accId, node) {
-  const isCollapsed = !settings.collapsedAccounts[accId];
-  settings.collapsedAccounts[accId] = isCollapsed;
+  settings.collapsedAccounts[accId] = !settings.collapsedAccounts[accId];
   saveSettings();
-  node.classList.toggle('collapsed', isCollapsed);
+  node.classList.toggle('collapsed', settings.collapsedAccounts[accId]);
   const foldersDiv = node.querySelector('.account-folders');
-  foldersDiv.style.maxHeight = isCollapsed ? '0' : '500px';
+  foldersDiv.style.maxHeight = settings.collapsedAccounts[accId] ? '0' : '500px';
 }
 
-// ── Folder selection ───────────────────────────────────────────────────────────
+// ── Folder selection + sync inteligente ────────────────────────────────────────
 function selectFolder(accountId, folderKey, realFolders) {
-  state.selectedAccountId = accountId;
-  state.selectedFolder = folderKey;
+  state.selectedAccountId   = accountId;
+  state.selectedFolder      = folderKey;
   state.selectedFolderReals = realFolders;
-  state.selectedEmailId = null;
+  state.selectedEmailId     = null;
   state.selectedIds.clear();
   state.currentPage = 1;
   hideEmail();
   renderAccountTree();
-  loadEmails();
+  loadEmails(); // carrega do banco local imediatamente
+
+  // Sync inteligente: só vai ao servidor se sem erro E passou MIN_SYNC_GAP
+  if (!state.syncErrors[accountId] && !state.syncingIds.has(accountId)) {
+    const last    = state.lastSyncTime[accountId] || 0;
+    const elapsed = Date.now() - last;
+    if (elapsed >= MIN_SYNC_GAP_MS) {
+      triggerSync(accountId, false);
+    }
+  }
 }
 
-function realFoldersFor(folderKey) {
-  if (state.selectedFolderReals && state.selectedFolderReals.length) {
+function realFoldersFor(folderKey, accountId) {
+  if (state.selectedFolderReals && state.selectedFolderReals.length &&
+      state.selectedAccountId === accountId) {
     return state.selectedFolderReals;
   }
-  // Fallback: tenta encontrar pastas reais que correspondem
-  if (!state.selectedAccountId) return [folderKey];
-  const counts = folderCountsData[state.selectedAccountId] || {};
-  const def = FOLDER_DEFS.find(d => d.key === folderKey);
+  const counts = folderCountsData[accountId] || {};
+  const def    = FOLDER_DEFS.find(d => d.key === folderKey);
   if (!def) return [folderKey];
   const matching = Object.keys(counts).filter(f => def.keywords.some(kw => f.toLowerCase().includes(kw)));
-  return matching.length ? matching : [folderKey === 'inbox' ? 'INBOX' : folderKey];
+  return matching.length ? matching : (folderKey === 'inbox' ? ['INBOX'] : [folderKey]);
+}
+
+// ── Sync triggers ──────────────────────────────────────────────────────────────
+async function triggerSync(accountId, force = true) {
+  const url = accountId
+    ? `/api/accounts/${accountId}/sync`
+    : '/api/sync/all';
+  await fetch(url, { method: 'POST' });
+}
+
+async function syncAll() {
+  const btn = document.getElementById('sync-all-btn');
+  btn.classList.add('spinning');
+  await fetch('/api/sync/all', { method: 'POST' });
+  setTimeout(() => btn.classList.remove('spinning'), 2000);
+}
+
+async function syncCurrent() {
+  const btn = document.getElementById('sync-btn');
+  btn.classList.add('spinning');
+  if (state.selectedAccountId) {
+    await triggerSync(state.selectedAccountId, true);
+  } else {
+    await fetch('/api/sync/all', { method: 'POST' });
+  }
+  setTimeout(() => btn.classList.remove('spinning'), 2000);
+}
+
+async function manualSyncAccount(accountId) {
+  state.syncErrors[accountId] = null;
+  renderAccountTree();
+  await triggerSync(accountId, true);
 }
 
 // ── Sort ───────────────────────────────────────────────────────────────────────
@@ -336,16 +458,17 @@ function setSortBy(col) {
   if (state.sortBy === col) {
     state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
   } else {
-    state.sortBy = col;
+    state.sortBy  = col;
     state.sortDir = col === 'date' ? 'desc' : 'asc';
   }
   updateSortArrows();
-  sortAndRender();
+  state.emails = sortEmails(state.emails);
+  renderEmailList();
 }
 
 function updateSortArrows() {
   ['from', 'subject', 'date'].forEach(col => {
-    const el = document.getElementById(`sort-${col}-arrow`);
+    const el  = document.getElementById(`sort-${col}-arrow`);
     const hdr = document.getElementById(`sort-${col}`);
     if (!el || !hdr) return;
     if (state.sortBy === col) {
@@ -377,34 +500,130 @@ function sortEmails(emails) {
   });
 }
 
-function sortAndRender() {
-  state.emails = sortEmails(state.emails);
-  renderEmailList();
-}
-
 // ── Email list ─────────────────────────────────────────────────────────────────
 async function loadEmails() {
   const loading = document.getElementById('list-loading');
   const empty   = document.getElementById('list-empty');
   loading.style.display = 'flex'; empty.style.display = 'none';
 
-  const folders = realFoldersFor(state.selectedFolder);
+  // Sempre filtra pela conta selecionada
+  const accountId = state.selectedAccountId;
+  const folders   = accountId
+    ? realFoldersFor(state.selectedFolder, accountId)
+    : [state.selectedFolder === 'inbox' ? 'INBOX' : state.selectedFolder];
+
   try {
     let all = [];
     for (const folder of folders) {
       const params = new URLSearchParams({ folder, page: state.currentPage, per_page: 50 });
-      if (state.selectedAccountId) params.set('account_id', state.selectedAccountId);
+      if (accountId) params.set('account_id', String(accountId));
       if (state.searchQuery) params.set('search', state.searchQuery);
       const data = await (await fetch(`/api/emails?${params}`)).json();
       all = all.concat(data.emails);
     }
-    state.emails = sortEmails(all);
-    renderEmailList();
-  } catch(e) { toast('Erro ao carregar e-mails', 'error'); }
-  finally { loading.style.display = 'none'; }
+    const newEmails = sortEmails(all);
+    _applyEmailDiff(newEmails);
+  } catch(e) {
+    toast('Erro ao carregar e-mails', 'error');
+  } finally {
+    loading.style.display = 'none';
+  }
+}
+
+// ── Diff animado: só re-renderiza linhas que mudaram ──────────────────────────
+function _applyEmailDiff(newEmails) {
+  const oldMap = new Map(state.emails.map(e => [e.id, e]));
+  const newMap = new Map(newEmails.map(e => [e.id, e]));
+  state.emails = newEmails;
+
+  const container = document.getElementById('email-list');
+  const empty     = document.getElementById('list-empty');
+
+  if (!newEmails.length) {
+    container.querySelectorAll('.email-item').forEach(el => el.remove());
+    empty.style.display = 'flex';
+    renderBulkBar();
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Remove itens que sumiram
+  container.querySelectorAll('.email-item').forEach(el => {
+    const id = parseInt(el.dataset.id);
+    if (!newMap.has(id)) {
+      el.classList.add('removing');
+      setTimeout(() => el.remove(), 200);
+    }
+  });
+
+  // Adiciona ou atualiza
+  let prevEl = null;
+  for (const email of newEmails) {
+    let item = container.querySelector(`.email-item[data-id="${email.id}"]`);
+    if (!item) {
+      // Novo item: cria e anima entrada
+      item = _buildEmailItem(email);
+      item.classList.add('appearing');
+      if (prevEl) prevEl.insertAdjacentElement('afterend', item);
+      else container.prepend(item);
+      // Remove classe de animação no próximo frame
+      requestAnimationFrame(() => requestAnimationFrame(() => item.classList.remove('appearing')));
+    } else {
+      // Atualiza flags sem recriar
+      const old = oldMap.get(email.id);
+      if (old) {
+        if (old.is_read !== email.is_read) {
+          item.classList.toggle('unread', !email.is_read);
+          const dot = item.querySelector('.dot-unread, .dot-read');
+          if (dot) dot.className = email.is_read ? 'dot-read' : 'dot-unread';
+        }
+        if (old.is_starred !== email.is_starred) {
+          const star = item.querySelector('.icon-star');
+          if (star) star.classList.toggle('starred', email.is_starred);
+        }
+      }
+      // Garante ordem correta no DOM
+      if (prevEl && prevEl.nextElementSibling !== item) {
+        prevEl.insertAdjacentElement('afterend', item);
+      }
+    }
+    item.classList.toggle('active',    email.id === state.selectedEmailId);
+    item.classList.toggle('selected',  state.selectedIds.has(email.id));
+    prevEl = item;
+  }
+
+  renderBulkBar();
+}
+
+function _buildEmailItem(email) {
+  const item = document.createElement('div');
+  item.className = 'email-item'
+    + (email.is_read ? '' : ' unread')
+    + (email.id === state.selectedEmailId ? ' active' : '')
+    + (state.selectedIds.has(email.id) ? ' selected' : '');
+  item.dataset.id = email.id;
+  item.innerHTML = `
+    <div class="ei-check-col">
+      <input type="checkbox" class="ei-checkbox" ${state.selectedIds.has(email.id) ? 'checked' : ''} onclick="toggleSelect(event,${email.id})">
+    </div>
+    <div class="ei-icons-col">
+      ${email.is_read ? '<span class="dot-read"></span>' : '<span class="dot-unread"></span>'}
+      <span class="icon-star ${email.is_starred ? 'starred' : ''}" onclick="quickStar(event,${email.id})">★</span>
+      ${email.has_attachments ? '<span class="icon-attach">📎</span>' : ''}
+    </div>
+    <div class="ei-from">${esc(email.from_name || email.from_addr)}</div>
+    <div class="ei-subject">${esc(email.subject)}</div>
+    <div class="ei-date">${fmtDate(email.date)}</div>
+  `;
+  item.onclick = e => {
+    if (e.target.classList.contains('ei-checkbox') || e.target.classList.contains('icon-star')) return;
+    openEmail(email.id);
+  };
+  return item;
 }
 
 function renderEmailList() {
+  // Compatibilidade: re-render completo quando necessário
   const container = document.getElementById('email-list');
   const empty     = document.getElementById('list-empty');
   container.querySelectorAll('.email-item').forEach(e => e.remove());
@@ -413,40 +632,20 @@ function renderEmailList() {
   empty.style.display = 'none';
 
   for (const email of state.emails) {
-    const isSel    = state.selectedIds.has(email.id);
-    const isActive = email.id === state.selectedEmailId;
-    const item = document.createElement('div');
-    item.className = 'email-item'
-      + (email.is_read ? '' : ' unread')
-      + (isActive ? ' active' : '')
-      + (isSel ? ' selected' : '');
-    item.dataset.id = email.id;
-
-    item.innerHTML = `
-      <div class="ei-check-col">
-        <input type="checkbox" class="ei-checkbox" ${isSel ? 'checked' : ''} onclick="toggleSelect(event,${email.id})">
-      </div>
-      <div class="ei-icons-col">
-        ${email.is_read ? '<span class="dot-read"></span>' : '<span class="dot-unread"></span>'}
-        <span class="icon-star ${email.is_starred ? 'starred' : ''}" onclick="quickStar(event,${email.id})">★</span>
-        ${email.has_attachments ? '<span class="icon-attach">📎</span>' : ''}
-      </div>
-      <div class="ei-from">${esc(email.from_name || email.from_addr)}</div>
-      <div class="ei-subject">${esc(email.subject)}</div>
-      <div class="ei-date">${fmtDate(email.date)}</div>
-    `;
-    item.onclick = e => { if (e.target.classList.contains('ei-checkbox') || e.target.classList.contains('icon-star')) return; openEmail(email.id); };
-    container.appendChild(item);
+    container.appendChild(_buildEmailItem(email));
   }
   renderBulkBar();
 }
 
-// ── Quick star (sem abrir email) ───────────────────────────────────────────────
+// ── Quick star ─────────────────────────────────────────────────────────────────
 async function quickStar(e, id) {
   e.stopPropagation();
   const data = await (await fetch(`/api/emails/${id}/star`, { method: 'POST' })).json();
   const le = state.emails.find(x => x.id === id);
-  if (le) { le.is_starred = data.starred; renderEmailList(); }
+  if (le) {
+    le.is_starred = data.starred;
+    _patchEmailItem(id, { is_starred: data.starred });
+  }
   if (state.selectedEmailId === id) {
     const btn = document.getElementById('ev-star-btn');
     if (btn) { btn.textContent = data.starred ? '★ Marcado' : '☆ Marcar'; btn.style.color = data.starred ? 'var(--amber)' : ''; }
@@ -488,7 +687,7 @@ async function bulkAction(action) {
 async function bulkActionAll(action) {
   const L = { mark_read: 'Marcar todos como lido', delete: 'Excluir todos' };
   if (!confirm(`${L[action]} na pasta atual?`)) return;
-  for (const folder of realFoldersFor(state.selectedFolder)) {
+  for (const folder of realFoldersFor(state.selectedFolder, state.selectedAccountId)) {
     await fetch('/api/emails/bulk', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, ids: [], folder, account_id: state.selectedAccountId }),
@@ -496,11 +695,6 @@ async function bulkActionAll(action) {
   }
   toast('Operação concluída', 'success'); await loadEmails(); await refreshFolderCounts();
   if (action === 'delete') { hideEmail(); state.selectedEmailId = null; }
-}
-
-async function refreshFolderCounts() {
-  await loadAllFolderCounts();
-  renderAccountTree();
 }
 
 // ── Email view ─────────────────────────────────────────────────────────────────
@@ -512,7 +706,10 @@ async function openEmail(id) {
   state.currentEmail = email;
 
   const le = state.emails.find(e => e.id === id);
-  if (le) { le.is_read = true; renderEmailList(); }
+  if (le) {
+    le.is_read = true;
+    _patchEmailItem(id, { is_read: true });
+  }
 
   state.emailShowImages = settings.showImagesByDefault;
   state.emailViewMode   = email.body_html ? 'html' : 'text';
@@ -520,7 +717,6 @@ async function openEmail(id) {
   document.getElementById('reading-empty').style.display = 'none';
   document.getElementById('email-view').style.display    = 'flex';
 
-  // Header
   document.getElementById('ev-subject').textContent   = email.subject;
   document.getElementById('ev-avatar').textContent    = (email.from_name || email.from_addr || '?').slice(0, 1).toUpperCase();
   document.getElementById('ev-from-name').textContent = email.from_name || email.from_addr;
@@ -528,22 +724,17 @@ async function openEmail(id) {
   document.getElementById('ev-to-line').textContent   = email.to_addr ? `Para: ${email.to_addr}` : '';
   document.getElementById('ev-date-meta').textContent = fmtDateFull(email.date);
 
-  // Star
   const starBtn = document.getElementById('ev-star-btn');
   starBtn.textContent = email.is_starred ? '★ Marcado' : '☆ Marcar';
   starBtn.style.color = email.is_starred ? 'var(--amber)' : '';
 
-  // Spam
   const isSpam  = isSpamFolder(email.folder || '');
   const spamBtn = document.getElementById('ev-spam-btn');
   spamBtn.textContent    = isSpam ? '✓ Não spam' : '⚠ Spam';
   spamBtn.dataset.isSpam = isSpam ? '1' : '0';
 
-  // Banner de junk
-  const banner = document.getElementById('ev-junk-banner');
-  banner.classList.toggle('visible', isSpam);
+  document.getElementById('ev-junk-banner').classList.toggle('visible', isSpam);
 
-  // Attachments
   const attDiv = document.getElementById('ev-attachments');
   if (email.attachments && email.attachments.length) {
     attDiv.style.display = 'flex';
@@ -611,14 +802,14 @@ async function toggleStar() {
   btn.textContent = data.starred ? '★ Marcado' : '☆ Marcar';
   btn.style.color = data.starred ? 'var(--amber)' : '';
   const le = state.emails.find(e => e.id === id);
-  if (le) { le.is_starred = data.starred; renderEmailList(); }
+  if (le) { le.is_starred = data.starred; _patchEmailItem(id, { is_starred: data.starred }); }
 }
 
 async function markUnread() {
   const id = state.selectedEmailId; if (!id) return;
   await fetch(`/api/emails/${id}/read`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ read: false }) });
   const le = state.emails.find(e => e.id === id);
-  if (le) { le.is_read = false; renderEmailList(); }
+  if (le) { le.is_read = false; _patchEmailItem(id, { is_read: false }); }
   hideEmail(); state.selectedEmailId = null;
   toast('Marcado como não lido', 'success');
 }
@@ -634,7 +825,7 @@ async function toggleSpam() {
   if (data.ok) {
     toast(isSpam ? 'Removido do spam' : 'Marcado como spam', 'success');
     state.emails = state.emails.filter(e => e.id !== id);
-    state.selectedEmailId = null; hideEmail(); renderEmailList(); await refreshFolderCounts();
+    state.selectedEmailId = null; hideEmail(); renderEmailList(); refreshFolderCounts();
   } else toast('Erro ao mover e-mail', 'error');
 }
 
@@ -643,7 +834,7 @@ async function deleteEmail() {
   if (!confirm('Excluir este e-mail?')) return;
   await fetch(`/api/emails/${state.selectedEmailId}`, { method: 'DELETE' });
   state.emails = state.emails.filter(e => e.id !== state.selectedEmailId);
-  state.selectedEmailId = null; hideEmail(); renderEmailList(); await refreshFolderCounts();
+  state.selectedEmailId = null; hideEmail(); renderEmailList(); refreshFolderCounts();
   toast('E-mail excluído', 'success');
 }
 
@@ -655,12 +846,11 @@ function openCompose(opts = {}) {
   document.getElementById('compose-subject').value = opts.subject || '';
   document.getElementById('compose-body').value    = opts.body || '';
   document.getElementById('compose-attach-list').innerHTML = '';
-  document.getElementById('compose-title').textContent = opts.title || 'Nova mensagem';
+  document.getElementById('compose-title').textContent    = opts.title || 'Nova mensagem';
   document.getElementById('compose-modal').classList.add('open');
   setTimeout(() => document.getElementById('compose-to').focus(), 50);
 }
 function closeCompose() { document.getElementById('compose-modal').classList.remove('open'); state.replyToId = null; state.attachments = []; }
-
 function _quoteBody(e) { return `\n\n--- Mensagem original ---\nDe: ${e.from_addr}\nData: ${fmtDateFull(e.date)}\n\n${e.body_text || ''}`; }
 
 function replyEmail() {
@@ -702,10 +892,10 @@ async function sendEmail() {
   btn.disabled = true; btn.textContent = 'Enviando...';
   const fd = new FormData();
   fd.append('account_id', document.getElementById('compose-account-select').value);
-  fd.append('to', document.getElementById('compose-to').value);
-  fd.append('cc', document.getElementById('compose-cc').value);
+  fd.append('to',      document.getElementById('compose-to').value);
+  fd.append('cc',      document.getElementById('compose-cc').value);
   fd.append('subject', document.getElementById('compose-subject').value);
-  fd.append('body', document.getElementById('compose-body').value);
+  fd.append('body',    document.getElementById('compose-body').value);
   if (state.replyToId) fd.append('reply_to_id', state.replyToId);
   for (const f of state.attachments) fd.append('attachments', f);
   try {
@@ -716,20 +906,7 @@ async function sendEmail() {
   finally { btn.disabled = false; btn.textContent = 'Enviar'; }
 }
 
-// ── Sync ───────────────────────────────────────────────────────────────────────
-async function syncAll() {
-  const btn = document.getElementById('sync-all-btn');
-  btn.classList.add('spinning');
-  await fetch('/api/sync/all', { method: 'POST' });
-  setTimeout(() => btn.classList.remove('spinning'), 2000);
-}
-async function syncCurrent() {
-  const btn = document.getElementById('sync-btn');
-  btn.classList.add('spinning');
-  const url = state.selectedAccountId ? `/api/accounts/${state.selectedAccountId}/sync` : '/api/sync/all';
-  await fetch(url, { method: 'POST' });
-  setTimeout(() => btn.classList.remove('spinning'), 2000);
-}
+// ── Sync .conf ─────────────────────────────────────────────────────────────────
 async function syncConf() {
   const btn = document.getElementById('sync-conf-btn');
   btn.disabled = true; btn.textContent = '⟳ Sincronizando...';
@@ -862,7 +1039,6 @@ function showTestResult(r) { if (r.ok) toast('✓ Conexão bem-sucedida!', 'succ
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 function esc(str) { if (!str) return ''; return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
 function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso), now = new Date();
@@ -870,7 +1046,6 @@ function fmtDate(iso) {
   if (now - d < 7 * 86400000) return d.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' });
   return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
 }
-
 function fmtDateFull(iso) { if (!iso) return ''; return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 function fmtSize(b) { if (!b) return ''; if (b < 1024) return `${b}B`; if (b < 1048576) return `${(b/1024).toFixed(1)}KB`; return `${(b/1048576).toFixed(1)}MB`; }
 

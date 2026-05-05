@@ -187,6 +187,9 @@ class MailService:
         self.db           = db
         self.socketio     = socketio
         self._folder_cache = {}  # account_id -> [folders]
+        # Throttle: impede sync simultâneo da mesma conta
+        self._syncing_accounts = set()
+        self._sync_lock = threading.Lock()
 
     def _emit(self, event, data):
         try:
@@ -283,6 +286,20 @@ class MailService:
     # ── Sync ──────────────────────────────────────────────────────────────────
 
     def sync_account(self, account_id: int):
+        # Throttle: impede sync simultâneo da mesma conta
+        with self._sync_lock:
+            if account_id in self._syncing_accounts:
+                log.info(f'Sync já em andamento para account_id={account_id}, ignorando')
+                return
+            self._syncing_accounts.add(account_id)
+
+        try:
+            self._do_sync_account(account_id)
+        finally:
+            with self._sync_lock:
+                self._syncing_accounts.discard(account_id)
+
+    def _do_sync_account(self, account_id: int):
         from database import db as _db, Account as _Account
         account = _Account.query.get(account_id)
         if not account:
@@ -296,22 +313,32 @@ class MailService:
             folders = self._get_sync_folders(account)
             log.info(f'Pastas para sync: {folders}')
             total_new = 0
+            total_flag_changes = 0
 
             for folder in folders:
-                total_new += self._sync_folder(account, folder)
+                new, flag_changes = self._sync_folder(account, folder)
+                total_new += new
+                total_flag_changes += flag_changes
 
             account.last_sync = datetime.utcnow()
             _db.session.commit()
-            self._emit('sync_done', {'account_id': account_id, 'email': account.email, 'new': total_new})
+            self._emit('sync_done', {
+                'account_id': account_id,
+                'email': account.email,
+                'new': total_new,
+                'flag_changes': total_flag_changes,
+            })
 
         except Exception as e:
             log.error(f'sync_account error: {e}')
             _pool.invalidate(account_id)
             self._emit('sync_error', {'account_id': account_id, 'error': str(e)})
 
-    def _sync_folder(self, account: Account, folder: str) -> int:
+    def _sync_folder(self, account: Account, folder: str):
+        """Retorna (new_count, flag_change_count)."""
         from database import db as _db
         new_count = 0
+        flag_changes = 0
 
         try:
             def _select(conn):
@@ -320,97 +347,143 @@ class MailService:
             status, _ = self._safe_exec(account, _select)
             if status != 'OK':
                 log.warning(f'Não foi possível selecionar: {folder}')
-                return 0
+                return 0, 0
 
-            # Cache de UIDs existentes — evita re-fetch
-            existing_uids = set(
-                row[0] for row in
-                _db.session.query(Email.uid)
-                    .filter_by(account_id=account.id, folder=folder)
-                    .all()
-            )
-
+            # ── 1. Busca todos os UIDs do servidor ────────────────────────────
             def _search(conn):
                 return conn.uid('search', None, 'ALL')
 
             _, data = self._safe_exec(account, _search)
-            all_uids = data[0].split() if data[0] else []
-            new_uids = [u for u in all_uids[-200:] if int(u) not in existing_uids]
+            all_uids_bytes = data[0].split() if data[0] else []
+            all_uids_server = {int(u) for u in all_uids_bytes}
 
-            log.info(f'{folder}: {len(all_uids)} total, {len(new_uids)} novos')
-            if not new_uids:
-                return 0
+            # ── 2. UIDs existentes no banco ────────────────────────────────────
+            existing_rows = (
+                _db.session.query(Email.uid, Email.id, Email.is_read)
+                    .filter_by(account_id=account.id, folder=folder)
+                    .all()
+            )
+            existing_uid_map = {row.uid: {'id': row.id, 'is_read': row.is_read} for row in existing_rows}
+            existing_uids = set(existing_uid_map.keys())
 
-            uid_str = ','.join(u.decode() for u in new_uids)
+            # ── 3. Novos UIDs: baixa body completo ────────────────────────────
+            new_uids_int = list(all_uids_server - existing_uids)
+            # Limita aos 200 mais recentes
+            new_uids_int = sorted(new_uids_int)[-200:]
 
-            def _fetch(conn):
-                return conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
+            if new_uids_int:
+                uid_str = ','.join(str(u) for u in new_uids_int)
 
-            _, msg_data = self._safe_exec(account, _fetch)
+                def _fetch(conn):
+                    return conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
 
-            batch = []
-            i = 0
-            while i < len(msg_data):
-                item = msg_data[i]
-                if not isinstance(item, tuple):
-                    i += 1
-                    continue
+                _, msg_data = self._safe_exec(account, _fetch)
 
-                meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
-                raw  = item[1]
-                uid_match = re.search(r'UID (\d+)', meta)
-                if not uid_match:
-                    i += 1
-                    continue
+                batch = []
+                i = 0
+                while i < len(msg_data):
+                    item = msg_data[i]
+                    if not isinstance(item, tuple):
+                        i += 1
+                        continue
 
-                uid     = int(uid_match.group(1))
-                is_read = '\\Seen' in meta
+                    meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
+                    raw  = item[1]
+                    uid_match = re.search(r'UID (\d+)', meta)
+                    if not uid_match:
+                        i += 1
+                        continue
 
-                try:
-                    msg = email_lib.message_from_bytes(raw, policy=email_policy.compat32)
-
-                    subject     = _decode_header_value(msg.get('Subject', ''))
-                    from_full   = _decode_header_value(msg.get('From', ''))
-                    from_name, from_addr = parseaddr(from_full)
-                    to_addr     = _decode_header_value(msg.get('To', ''))
-                    cc_addr     = _decode_header_value(msg.get('Cc', ''))
-                    reply_to    = _decode_header_value(msg.get('Reply-To', ''))
-                    message_id  = (msg.get('Message-ID') or '').strip()
-                    in_reply_to = (msg.get('In-Reply-To') or '').strip()
+                    uid     = int(uid_match.group(1))
+                    is_read = '\\Seen' in meta
 
                     try:
-                        date = parsedate_to_datetime(msg.get('Date', ''))
-                        if date.tzinfo:
-                            date = date.replace(tzinfo=None)
-                    except Exception:
-                        date = datetime.utcnow()
+                        msg = email_lib.message_from_bytes(raw, policy=email_policy.compat32)
 
-                    body_text, body_html = _get_body(msg)
-                    att_data = _get_attachments(msg)
+                        subject     = _decode_header_value(msg.get('Subject', ''))
+                        from_full   = _decode_header_value(msg.get('From', ''))
+                        from_name, from_addr = parseaddr(from_full)
+                        to_addr     = _decode_header_value(msg.get('To', ''))
+                        cc_addr     = _decode_header_value(msg.get('Cc', ''))
+                        reply_to    = _decode_header_value(msg.get('Reply-To', ''))
+                        message_id  = (msg.get('Message-ID') or '').strip()
+                        in_reply_to = (msg.get('In-Reply-To') or '').strip()
 
-                    email_obj = Email(
-                        account_id=account.id, folder=folder, uid=uid,
-                        message_id=message_id, in_reply_to=in_reply_to,
-                        subject=subject or '(sem assunto)',
-                        from_addr=from_addr, from_name=from_name,
-                        to_addr=to_addr, cc_addr=cc_addr, reply_to=reply_to,
-                        date=date, body_text=body_text, body_html=body_html,
-                        is_read=is_read, has_attachments=bool(att_data),
-                    )
-                    batch.append((email_obj, att_data))
-                    new_count += 1
+                        try:
+                            date = parsedate_to_datetime(msg.get('Date', ''))
+                            if date.tzinfo:
+                                date = date.replace(tzinfo=None)
+                        except Exception:
+                            date = datetime.utcnow()
 
-                    if len(batch) >= BATCH_SIZE:
-                        self._flush_batch(_db, account, batch)
-                        batch = []
+                        body_text, body_html = _get_body(msg)
+                        att_data = _get_attachments(msg)
 
+                        email_obj = Email(
+                            account_id=account.id, folder=folder, uid=uid,
+                            message_id=message_id, in_reply_to=in_reply_to,
+                            subject=subject or '(sem assunto)',
+                            from_addr=from_addr, from_name=from_name,
+                            to_addr=to_addr, cc_addr=cc_addr, reply_to=reply_to,
+                            date=date, body_text=body_text, body_html=body_html,
+                            is_read=is_read, has_attachments=bool(att_data),
+                        )
+                        batch.append((email_obj, att_data))
+                        new_count += 1
+
+                        if len(batch) >= BATCH_SIZE:
+                            self._flush_batch(_db, account, batch)
+                            batch = []
+
+                    except Exception as e:
+                        log.warning(f'Parse error UID {uid}: {e}')
+
+                    i += 1
+
+                if batch:
+                    self._flush_batch(_db, account, batch)
+
+            # ── 4. UIDs existentes: sync incremental de flags ──────────────────
+            # Só verifica os 500 UIDs mais recentes para não sobrecarregar
+            uids_to_check = sorted(existing_uids & all_uids_server)[-500:]
+            if uids_to_check:
+                uid_str = ','.join(str(u) for u in uids_to_check)
+
+                def _fetch_flags(conn):
+                    return conn.uid('fetch', uid_str, '(UID FLAGS)')
+
+                try:
+                    _, flag_data = self._safe_exec(account, _fetch_flags)
+                    updates = []
+                    for item in flag_data:
+                        if not isinstance(item, (tuple, list)):
+                            continue
+                        meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
+                        uid_match = re.search(r'UID (\d+)', meta)
+                        if not uid_match:
+                            continue
+                        uid = int(uid_match.group(1))
+                        server_read = '\\Seen' in meta
+                        row = existing_uid_map.get(uid)
+                        if row and row['is_read'] != server_read:
+                            updates.append((row['id'], server_read))
+
+                    if updates:
+                        for email_id, is_read in updates:
+                            _db.session.query(Email).filter_by(id=email_id).update(
+                                {'is_read': is_read}, synchronize_session=False
+                            )
+                        _db.session.commit()
+                        flag_changes = len(updates)
+                        log.info(f'{folder}: {flag_changes} flags atualizadas')
+                        if flag_changes > 0:
+                            self._emit('flags_updated', {
+                                'account_id': account.id,
+                                'folder': folder,
+                                'updates': [{'id': eid, 'is_read': r} for eid, r in updates],
+                            })
                 except Exception as e:
-                    log.warning(f'Parse error UID {uid}: {e}')
-
-                i += 1
-
-            if batch:
-                self._flush_batch(_db, account, batch)
+                    log.warning(f'Flag sync error for {folder}: {e}')
 
         except Exception as e:
             log.error(f'_sync_folder {folder} error: {e}')
@@ -421,7 +494,7 @@ class MailService:
             except Exception:
                 pass
 
-        return new_count
+        return new_count, flag_changes
 
     def _flush_batch(self, _db, account, batch):
         try:
@@ -558,7 +631,6 @@ class MailService:
             if cc:  recipients += [r.strip() for r in cc.split(',') if r.strip()]
             if bcc: recipients += [r.strip() for r in bcc.split(',') if r.strip()]
 
-            # SMTP — nova conexão por envio (protocolo stateless por natureza)
             if account.smtp_ssl:
                 s = smtplib.SMTP_SSL(account.smtp_host, account.smtp_port, timeout=30)
             else:
