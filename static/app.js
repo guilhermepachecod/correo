@@ -289,8 +289,6 @@ function getAccountUnread(accountId) {
 }
 
 function renderAccountTree() {
-  // DEBUG temporário — remover após confirmar
-  console.log('[correo] folderCountsData:', JSON.stringify(folderCountsData));
   const container = document.getElementById('account-tree');
   container.innerHTML = '';
 
@@ -334,7 +332,14 @@ function renderAccountTree() {
     const realFolderKeys = Object.keys(counts);
 
     for (const def of FOLDER_DEFS) {
-      const matching = realFolderKeys.filter(f => def.keywords.some(kw => f.toLowerCase().includes(kw)));
+      const matching = realFolderKeys.filter(f => {
+        const fl = f.toLowerCase();
+        return def.keywords.some(kw => {
+          // Match exato (ex: 'inbox') OU sufixo após ponto (ex: 'inbox.sent' -> 'sent')
+          const suffix = fl.includes('.') ? fl.split('.').pop() : fl;
+          return fl === kw || suffix === kw || suffix.startsWith(kw);
+        });
+      });
       matching.forEach(f => seen.add(f));
 
       const totalC  = matching.reduce((s, f) => s + (counts[f]?.total  || 0), 0);
@@ -421,10 +426,12 @@ function realFoldersFor(folderKey, accountId) {
   const counts = folderCountsData[accountId] || {};
   const def    = FOLDER_DEFS.find(d => d.key === folderKey);
   if (!def) return [folderKey];
-  // Match exato para evitar INBOX.Sent, INBOX.Spam etc batendo em keywords errados
-  const matching = Object.keys(counts).filter(f =>
-    def.keywords.some(kw => f.toLowerCase() === kw || f.toUpperCase() === kw.toUpperCase())
-  );
+  // Match por sufixo: INBOX -> 'inbox', INBOX.Sent -> 'sent', INBOX.Drafts -> 'drafts'
+  const matching = Object.keys(counts).filter(f => {
+    const fl = f.toLowerCase();
+    const suffix = fl.includes('.') ? fl.split('.').pop() : fl;
+    return def.keywords.some(kw => fl === kw || suffix === kw || suffix.startsWith(kw));
+  });
   return matching.length ? matching : (folderKey === 'inbox' ? ['INBOX'] : [folderKey]);
 }
 
