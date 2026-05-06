@@ -283,17 +283,14 @@ const FOLDER_DEFS = [
 ];
 
 function getAccountUnread(accountId) {
-  // Badge da conta = não lidos de TODAS as pastas exceto sent/drafts
+  // Badge da conta = soma de não lidos de TODAS as pastas
   const data = folderCountsData[accountId] || {};
-  const EXCLUDE = ['sent', 'draft'];
-  return Object.entries(data).reduce((s, [folder, c]) => {
-    const f = folder.toLowerCase();
-    if (EXCLUDE.some(kw => f.includes(kw))) return s;
-    return s + (c.unread || 0);
-  }, 0);
+  return Object.values(data).reduce((s, c) => s + (c.unread || 0), 0);
 }
 
 function renderAccountTree() {
+  // DEBUG temporário — remover após confirmar
+  console.log('[correo] folderCountsData:', JSON.stringify(folderCountsData));
   const container = document.getElementById('account-tree');
   container.innerHTML = '';
 
@@ -416,6 +413,7 @@ function selectFolder(accountId, folderKey, realFolders) {
 }
 
 function realFoldersFor(folderKey, accountId) {
+  // Sempre usa a lista definida ao clicar — é a mais confiável
   if (state.selectedFolderReals && state.selectedFolderReals.length &&
       state.selectedAccountId === accountId) {
     return state.selectedFolderReals;
@@ -423,7 +421,10 @@ function realFoldersFor(folderKey, accountId) {
   const counts = folderCountsData[accountId] || {};
   const def    = FOLDER_DEFS.find(d => d.key === folderKey);
   if (!def) return [folderKey];
-  const matching = Object.keys(counts).filter(f => def.keywords.some(kw => f.toLowerCase().includes(kw)));
+  // Match exato para evitar INBOX.Sent, INBOX.Spam etc batendo em keywords errados
+  const matching = Object.keys(counts).filter(f =>
+    def.keywords.some(kw => f.toLowerCase() === kw || f.toUpperCase() === kw.toUpperCase())
+  );
   return matching.length ? matching : (folderKey === 'inbox' ? ['INBOX'] : [folderKey]);
 }
 
