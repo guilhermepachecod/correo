@@ -23,7 +23,7 @@ const state = {
   lastSyncTime: {},     // accountId -> timestamp (ms)
 };
 
-const MIN_SYNC_GAP_MS = 15 * 60 * 1000; // 15 min entre syncs automáticos por pasta // 5 min entre syncs automáticos
+// IDLE cuida da INBOX automaticamente — sync manual cobre outras pastas // 5 min entre syncs automáticos
 
 // ── Settings ───────────────────────────────────────────────────────────────────
 const settings = {
@@ -105,32 +105,14 @@ function updateSettingsUI() {
   if (sel) sel.value = String(settings.autoSyncMin || 0);
 }
 
-// ── Auto-sync ──────────────────────────────────────────────────────────────────
-let _autoSyncTimer = null;
-
+// ── Auto-sync desativado — IMAP IDLE substitui polling ────────────────────────
+// O backend mantém conexão IDLE por conta. O servidor notifica e-mails novos.
+// Sync manual (↻) ainda disponível para buscar outras pastas além da INBOX.
 function setAutoSync(val) {
   settings.autoSyncMin = parseInt(val) || 0;
   saveSettings();
-  _startAutoSync();
-}
-
-function _startAutoSync() {
-  if (_autoSyncTimer) { clearInterval(_autoSyncTimer); _autoSyncTimer = null; }
-  if (!settings.autoSyncMin || settings.autoSyncMin <= 0) return;
-  const ms = settings.autoSyncMin * 60 * 1000;
-  _autoSyncTimer = setInterval(() => {
-    // Sync silencioso: não mostra spinner nem bloqueia UI
-    _silentSyncAll();
-  }, ms);
-  log.debug(`Auto-sync ativado: a cada ${settings.autoSyncMin} min`);
-}
-
-async function _silentSyncAll() {
-  // Só sincroniza contas sem erro e que não estão em andamento
-  for (const acc of state.accounts) {
-    if (!state.syncErrors[acc.id] && !state.syncingIds.has(acc.id)) {
-      await fetch(`/api/accounts/${acc.id}/sync`, { method: 'POST' });
-    }
+  if (settings.autoSyncMin > 0) {
+    toast('IDLE ativo — o servidor notifica e-mails novos automaticamente', 'info');
   }
 }
 
@@ -190,6 +172,23 @@ socket.on('flags_updated', d => {
   }
 });
 
+// ── IDLE status ───────────────────────────────────────────────────────────────
+socket.on('idle_status', d => {
+  const node = document.querySelector(`.account-node[data-acc-id="${d.account_id}"]`);
+  if (!node) return;
+  const icon = node.querySelector('.account-icon');
+  if (!icon) return;
+  if (d.status === 'connected') {
+    icon.innerHTML = '✉';
+    icon.style.color = '';
+    icon.title = 'IDLE conectado';
+  } else {
+    icon.innerHTML = '⚡';
+    icon.style.color = 'var(--amber)';
+    icon.title = 'IDLE reconectando...';
+  }
+});
+
 // Patch cirúrgico de uma linha na lista (sem re-render completo)
 function _patchEmailItem(emailId, changes) {
   const item = document.querySelector(`.email-item[data-id="${emailId}"]`);
@@ -228,7 +227,7 @@ const log = {
 // ── Init ───────────────────────────────────────────────────────────────────────
 async function init() {
   loadSettings();
-  _startAutoSync();
+  _initScrollInfinite();
   await loadAccounts();
   await loadEmails();
 }
@@ -399,13 +398,11 @@ function selectFolder(accountId, folderKey, realFolders) {
   renderAccountTree();
   loadEmails(); // carrega do banco local imediatamente
 
-  // Sync inteligente: só vai ao servidor se sem erro E passou MIN_SYNC_GAP
-  if (!state.syncErrors[accountId] && !state.syncingIds.has(accountId)) {
-    const last    = state.lastSyncTime[accountId] || 0;
-    const elapsed = Date.now() - last;
-    if (elapsed >= MIN_SYNC_GAP_MS) {
-      triggerSync(accountId, false);
-    }
+  // IDLE monitora INBOX automaticamente.
+  // Para outras pastas, faz sync manual ao clicar.
+  const isInbox = (state.selectedFolderReals || []).some(f => /^inbox$/i.test(f));
+  if (!isInbox && !state.syncingIds.has(accountId)) {
+    triggerSync(accountId, false);
   }
 }
 

@@ -12,15 +12,16 @@ import logging
 import re
 import threading
 import time
+import socket
 from datetime import datetime
 from collections import defaultdict
 
-from database import Email, Attachment, Account
+from database import Email, Attachment, Account, EmailFilter, \
+    enforce_email_limit, resolve_thread_id, ATTACHMENTS_DIR
 
 log = logging.getLogger(__name__)
 
 BATCH_SIZE = 50
-
 
 # ── Connection Pool ────────────────────────────────────────────────────────────
 
@@ -32,9 +33,9 @@ class IMAPPool:
     """
 
     def __init__(self):
-        self._conns       = {}   # account_id -> imaplib connection
-        self._locks       = {}   # account_id -> threading.Lock
-        self._meta        = {}   # account_id -> dict de credenciais
+        self._conns       = {}
+        self._locks       = {}
+        self._meta        = {}
         self._global_lock = threading.Lock()
 
     def _get_lock(self, account_id):
@@ -182,30 +183,442 @@ def _get_attachments(msg):
     return attachments
 
 
+def _parse_email_from_raw(raw: bytes, uid: int, folder: str,
+                           account_id: int, is_read: bool) -> tuple:
+    """Parseia um e-mail raw e retorna (Email obj, att_data list)."""
+    msg = email_lib.message_from_bytes(raw, policy=email_policy.compat32)
+
+    subject     = _decode_header_value(msg.get('Subject', ''))
+    from_full   = _decode_header_value(msg.get('From', ''))
+    from_name, from_addr = parseaddr(from_full)
+    to_addr     = _decode_header_value(msg.get('To', ''))
+    cc_addr     = _decode_header_value(msg.get('Cc', ''))
+    reply_to    = _decode_header_value(msg.get('Reply-To', ''))
+    message_id  = (msg.get('Message-ID') or '').strip()
+    in_reply_to = (msg.get('In-Reply-To') or '').strip()
+
+    try:
+        date = parsedate_to_datetime(msg.get('Date', ''))
+        if date.tzinfo:
+            date = date.replace(tzinfo=None)
+    except Exception:
+        date = datetime.utcnow()
+
+    body_text, body_html = _get_body(msg)
+    att_data = _get_attachments(msg)
+    thread_id = resolve_thread_id(message_id, in_reply_to)
+
+    email_obj = Email(
+        account_id=account_id, folder=folder, uid=uid,
+        message_id=message_id, in_reply_to=in_reply_to,
+        thread_id=thread_id,
+        subject=subject or '(sem assunto)',
+        from_addr=from_addr, from_name=from_name,
+        to_addr=to_addr, cc_addr=cc_addr, reply_to=reply_to,
+        date=date, body_text=body_text, body_html=body_html,
+        is_read=is_read, has_attachments=bool(att_data),
+    )
+    return email_obj, att_data
+
+
+# ── IMAP IDLE Manager ──────────────────────────────────────────────────────────
+
+class IMAPIdleManager:
+    """
+    Mantém uma conexão IMAP IDLE por conta.
+    Quando o servidor notifica que chegou e-mail novo (EXISTS),
+    faz fetch apenas do e-mail novo e emite via WebSocket.
+
+    IDLE spec: RFC 2177
+    - Cliente envia: IDLE
+    - Servidor responde: + idling
+    - Servidor envia notificações: * N EXISTS, * N EXPUNGE, etc.
+    - Para sair: cliente envia DONE
+    - Reconecta automaticamente se cair
+
+    Timeout: reenvia IDLE a cada 25 min (servidores encerram após 30 min)
+    """
+
+    IDLE_TIMEOUT   = 25 * 60   # 25 minutos — renova antes do servidor desconectar
+    RECONNECT_BASE = 30        # segundos antes de tentar reconectar
+    RECONNECT_MAX  = 600       # backoff máximo 10 minutos
+    FOLDER         = 'INBOX'   # pasta a monitorar via IDLE
+
+    def __init__(self, mail_service, app):
+        self._ms        = mail_service   # referência ao MailService
+        self._app       = app            # contexto Flask
+        self._threads   = {}             # account_id -> Thread
+        self._stop_flags = {}            # account_id -> threading.Event
+        self._lock      = threading.Lock()
+
+    def start_account(self, account_id: int):
+        """Inicia IDLE para uma conta. Idempotente."""
+        with self._lock:
+            if account_id in self._threads and self._threads[account_id].is_alive():
+                return
+            stop = threading.Event()
+            self._stop_flags[account_id] = stop
+            t = threading.Thread(
+                target=self._idle_loop,
+                args=(account_id, stop),
+                daemon=True,
+                name=f'idle-{account_id}',
+            )
+            self._threads[account_id] = t
+            t.start()
+            log.info(f'IDLE iniciado para account_id={account_id}')
+
+    def stop_account(self, account_id: int):
+        """Para o IDLE de uma conta."""
+        with self._lock:
+            flag = self._stop_flags.get(account_id)
+            if flag:
+                flag.set()
+            _pool.invalidate(account_id)
+
+    def stop_all(self):
+        with self._lock:
+            for flag in self._stop_flags.values():
+                flag.set()
+            _pool.close_all()
+
+    def restart_account(self, account_id: int):
+        self.stop_account(account_id)
+        time.sleep(1)
+        self.start_account(account_id)
+
+    def _idle_loop(self, account_id: int, stop: threading.Event):
+        """Loop principal de IDLE para uma conta. Roda em thread dedicada."""
+        backoff = self.RECONNECT_BASE
+
+        while not stop.is_set():
+            try:
+                with self._app.app_context():
+                    self._run_idle_session(account_id, stop)
+                backoff = self.RECONNECT_BASE  # sucesso — reseta backoff
+            except Exception as e:
+                log.warning(f'IDLE account_id={account_id} erro: {e}')
+                _pool.invalidate(account_id)
+                if stop.is_set():
+                    break
+                log.info(f'IDLE account_id={account_id} reconectando em {backoff}s')
+                stop.wait(backoff)
+                backoff = min(backoff * 2, self.RECONNECT_MAX)
+
+    def _run_idle_session(self, account_id: int, stop: threading.Event):
+        """
+        Sessão IDLE completa:
+        1. Sync inicial ao conectar (busca UIDs novos desde o último sync)
+        2. Entra em IDLE
+        3. Processa notificações do servidor
+        4. Renova IDLE a cada 25 min
+        """
+        from database import db as _db, Account as _Account
+
+        account = _Account.query.get(account_id)
+        if not account:
+            return
+
+        log.info(f'IDLE sessão iniciando para {account.email}')
+        _pool.register(account)
+
+        # Conexão dedicada para IDLE (separada do pool de operações)
+        if account.imap_ssl:
+            conn = imaplib.IMAP4_SSL(account.imap_host, account.imap_port)
+        else:
+            conn = imaplib.IMAP4(account.imap_host, account.imap_port)
+        conn.login(account.username, account.get_password())
+
+        try:
+            # Seleciona INBOX
+            status, data = conn.select('INBOX', readonly=False)
+            if status != 'OK':
+                raise RuntimeError(f'SELECT INBOX falhou: {data}')
+
+            # Extrai total de mensagens atual
+            exists_count = int(data[0])
+
+            # Sync inicial — busca UIDs novos que ainda não estão no banco
+            self._initial_sync(account, conn, _db)
+
+            # Emite que está online
+            self._ms._emit('idle_status', {
+                'account_id': account_id,
+                'email': account.email,
+                'status': 'connected',
+            })
+
+            log.info(f'IDLE {account.email}: {exists_count} msgs, entrando em IDLE')
+
+            while not stop.is_set():
+                # Entra em IDLE
+                tag = conn._new_tag().decode()
+                conn.send(f'{tag} IDLE\r\n'.encode())
+
+                # Lê resposta do servidor (deve ser "+ idling")
+                resp = conn.readline()
+                if not resp.startswith(b'+'):
+                    raise RuntimeError(f'IDLE não aceito: {resp}')
+
+                # Lê notificações até timeout ou stop
+                deadline = time.time() + self.IDLE_TIMEOUT
+                new_exists = exists_count
+
+                while not stop.is_set():
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break  # timeout — sai para renovar IDLE
+
+                    # Timeout no socket para não bloquear para sempre
+                    conn.socket().settimeout(min(remaining, 60))
+
+                    try:
+                        line = conn.readline()
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        raise  # erro real — sai e reconecta
+
+                    if not line:
+                        raise RuntimeError('Conexão IDLE encerrada pelo servidor')
+
+                    # Processa notificações unilaterais do servidor
+                    # Formato: * N EXISTS  ou  * N EXPUNGE  ou  * N RECENT
+                    m = re.match(rb'\* (\d+) (EXISTS|EXPUNGE|RECENT)', line)
+                    if m:
+                        count = int(m.group(1))
+                        kind  = m.group(2).decode()
+                        if kind == 'EXISTS' and count > new_exists:
+                            log.info(f'IDLE {account.email}: {count - new_exists} e-mail(s) novo(s)')
+                            new_exists = count
+                            # Sai do IDLE para buscar os novos
+                            break
+
+                # Sai do IDLE: envia DONE
+                try:
+                    conn.send(b'DONE\r\n')
+                    # Lê a resposta do tag IDLE (OK Completed)
+                    while True:
+                        line = conn.readline()
+                        if line.startswith(tag.encode()):
+                            break
+                except Exception as e:
+                    log.warning(f'IDLE DONE error: {e}')
+
+                conn.socket().settimeout(30)
+
+                # Se houve e-mails novos, faz fetch
+                if new_exists > exists_count and not stop.is_set():
+                    fetched = self._fetch_new(account, conn, _db, exists_count + 1, new_exists)
+                    exists_count = new_exists
+                    if fetched:
+                        log.info(f'IDLE {account.email}: {fetched} e-mail(s) salvo(s)')
+                else:
+                    exists_count = new_exists
+
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+            self._ms._emit('idle_status', {
+                'account_id': account_id,
+                'email': account.email,
+                'status': 'disconnected',
+            })
+
+    def _initial_sync(self, account: Account, conn, _db):
+        """
+        Sync inicial ao conectar:
+        - Busca UIDs existentes no servidor
+        - Compara com banco
+        - Faz fetch só dos novos (máx 100 para não demorar)
+        - Atualiza flags dos existentes
+        """
+        try:
+            _, data = conn.uid('search', None, 'ALL')
+            server_uids = [int(u) for u in (data[0].split() if data[0] else [])]
+
+            if not server_uids:
+                return
+
+            existing = set(
+                row[0] for row in
+                _db.session.query(Email.uid)
+                    .filter_by(account_id=account.id, folder='INBOX').all()
+            )
+
+            new_uids = sorted(set(server_uids) - existing)[-100:]
+
+            if new_uids:
+                log.info(f'IDLE sync inicial {account.email}: {len(new_uids)} novos')
+                uid_str = ','.join(str(u) for u in new_uids)
+                _, msg_data = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
+                self._process_fetch_data(account, msg_data, 'INBOX', _db)
+
+            # Sync de flags dos 200 mais recentes
+            recent_uids = sorted(set(server_uids) & existing)[-200:]
+            if recent_uids:
+                uid_str = ','.join(str(u) for u in recent_uids)
+                _, flag_data = conn.uid('fetch', uid_str, '(UID FLAGS)')
+                self._sync_flags(account, flag_data, _db)
+
+        except Exception as e:
+            log.warning(f'IDLE sync inicial error {account.email}: {e}')
+
+    def _fetch_new(self, account: Account, conn, _db,
+                   seq_from: int, seq_to: int) -> int:
+        """
+        Faz fetch dos e-mails por sequence number (mais simples que UID após IDLE).
+        Retorna quantidade salva.
+        """
+        try:
+            seq_str = f'{seq_from}:{seq_to}'
+            _, msg_data = conn.fetch(seq_str, '(UID FLAGS BODY.PEEK[])')
+            return self._process_fetch_data(account, msg_data, 'INBOX', _db)
+        except Exception as e:
+            log.warning(f'IDLE fetch_new error {account.email}: {e}')
+            return 0
+
+    def _process_fetch_data(self, account: Account, msg_data, folder: str, _db) -> int:
+        """Processa dados de fetch e salva e-mails novos no banco. Retorna count."""
+        saved = 0
+        i = 0
+        while i < len(msg_data):
+            item = msg_data[i]
+            if not isinstance(item, tuple):
+                i += 1
+                continue
+
+            meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
+            raw  = item[1]
+
+            uid_match = re.search(r'UID (\d+)', meta)
+            if not uid_match:
+                i += 1
+                continue
+
+            uid     = int(uid_match.group(1))
+            is_read = '\\Seen' in meta
+
+            # Verifica se já existe
+            exists = _db.session.query(Email.id)\
+                                .filter_by(account_id=account.id,
+                                           folder=folder, uid=uid).first()
+            if exists:
+                i += 1
+                continue
+
+            try:
+                email_obj, att_data = _parse_email_from_raw(
+                    raw, uid, folder, account.id, is_read
+                )
+                _db.session.add(email_obj)
+                _db.session.flush()
+
+                for a in att_data:
+                    att = Attachment(
+                        email_id=email_obj.id,
+                        filename=a['filename'],
+                        content_type=a['content_type'],
+                        size=a['size'],
+                    )
+                    try:
+                        att.save_to_disk(a['data'])
+                    except Exception:
+                        att.data = a['data']
+                    _db.session.add(att)
+
+                _db.session.commit()
+
+                # Aplica filtros
+                filters = list(
+                    EmailFilter.query
+                        .filter_by(account_id=account.id, enabled=True)
+                        .order_by(EmailFilter.priority.asc()).all()
+                )
+                self._ms._apply_filters(email_obj, filters)
+
+                # Emite para o frontend
+                self._ms._emit('new_email', {
+                    'account_id': account.id,
+                    'folder':     email_obj.folder,
+                    'email':      email_obj.to_list_dict(),
+                })
+
+                saved += 1
+            except Exception as e:
+                log.warning(f'IDLE parse error UID {uid}: {e}')
+                try: _db.session.rollback()
+                except Exception: pass
+
+            i += 1
+
+        enforce_email_limit(account.id)
+        return saved
+
+    def _sync_flags(self, account: Account, flag_data, _db):
+        """Atualiza flags (lido/não-lido) dos e-mails existentes."""
+        updates = []
+        existing_map = dict(
+            _db.session.query(Email.uid, Email.id)
+                .filter_by(account_id=account.id, folder='INBOX').all()
+        )
+        for item in flag_data:
+            if not isinstance(item, (tuple, list)):
+                continue
+            meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
+            uid_match = re.search(r'UID (\d+)', meta)
+            if not uid_match:
+                continue
+            uid = int(uid_match.group(1))
+            server_read = '\\Seen' in meta
+            email_id = existing_map.get(uid)
+            if email_id:
+                updates.append((email_id, server_read))
+
+        if updates:
+            for email_id, is_read in updates:
+                _db.session.query(Email).filter_by(id=email_id).update(
+                    {'is_read': is_read}, synchronize_session=False
+                )
+            _db.session.commit()
+            self._ms._emit('flags_updated', {
+                'account_id': account.id,
+                'folder': 'INBOX',
+                'updates': [{'id': eid, 'is_read': r} for eid, r in updates],
+            })
+
+
 # ── MailService ────────────────────────────────────────────────────────────────
 
 class MailService:
     def __init__(self, db, socketio):
         self.db            = db
         self.socketio      = socketio
-        self._folder_cache = {}  # account_id -> [folders]
+        self._folder_cache = {}
+        self.idle_manager  = None  # inicializado pelo app após criar o contexto
 
-        # Throttle: impede sync simultâneo da mesma conta
-        self._syncing_accounts = set()
-        self._sync_lock = threading.Lock()
+    def init_idle(self, app):
+        """Inicializa o IDLE manager e arranca todos as contas ativas."""
+        self.idle_manager = IMAPIdleManager(self, app)
+        with app.app_context():
+            from database import Account as _Account
+            for account in _Account.query.all():
+                self.idle_manager.start_account(account.id)
+        log.info('IDLE manager inicializado')
 
-        # Rate limit por host IMAP: um lock por host garante serialização
-        # de contas no mesmo servidor e evita bloqueio por excesso de conexões
-        self._host_locks  = defaultdict(threading.Lock)  # host -> Lock
-        self._host_errors = {}   # host -> (error_str, timestamp)
-        self._backoff_secs = {}  # host -> segundos de espera atual
+    def start_idle_for(self, account_id: int):
+        if self.idle_manager:
+            self.idle_manager.start_account(account_id)
 
-        # Delay entre syncs de contas no mesmo host (segundos)
-        self.INTER_ACCOUNT_DELAY = 3
-        # Backoff inicial quando host retorna erro (segundos)
-        self.BACKOFF_INITIAL = 30
-        # Backoff máximo (segundos)
-        self.BACKOFF_MAX = 600  # 10 minutos
+    def stop_idle_for(self, account_id: int):
+        if self.idle_manager:
+            self.idle_manager.stop_account(account_id)
+
+    def restart_idle_for(self, account_id: int):
+        if self.idle_manager:
+            self.idle_manager.restart_account(account_id)
 
     def _emit(self, event, data):
         try:
@@ -218,7 +631,6 @@ class MailService:
         return _pool.get(account.id)
 
     def _safe_exec(self, account: Account, fn):
-        """Executa fn(conn) com retry automático em caso de falha."""
         try:
             conn = self._get_conn(account)
             return fn(conn)
@@ -299,92 +711,24 @@ class MailService:
                 result.append(f)
         return result[:10]
 
-    # ── Sync ──────────────────────────────────────────────────────────────────
+    # ── Sync manual (para pastas não-INBOX e sync forçado) ────────────────────
 
     def sync_account(self, account_id: int):
-        """Sincroniza uma conta respeitando rate limit por host."""
-        from database import Account as _Account
-        account = _Account.query.get(account_id)
-        if not account:
-            return
-
-        host = account.imap_host
-
-        # Throttle: impede sync simultâneo da mesma conta
-        with self._sync_lock:
-            if account_id in self._syncing_accounts:
-                log.info(f'Sync já em andamento para account_id={account_id}, ignorando')
-                return
-            self._syncing_accounts.add(account_id)
-
-        try:
-            # Verifica backoff do host
-            if self._is_host_in_backoff(host):
-                remaining = self._backoff_remaining(host)
-                log.info(f'Host {host} em backoff por mais {remaining:.0f}s, pulando conta {account_id}')
-                self._emit('sync_error', {
-                    'account_id': account_id,
-                    'error': f'Servidor em espera após erro ({remaining:.0f}s restantes)',
-                })
-                return
-
-            # Lock por host: serializa contas no mesmo servidor
-            host_lock = self._host_locks[host]
-            acquired = host_lock.acquire(blocking=True, timeout=120)
-            if not acquired:
-                log.warning(f'Timeout aguardando lock do host {host}')
-                return
-            try:
-                # Pequena pausa entre contas do mesmo host
-                time.sleep(self.INTER_ACCOUNT_DELAY)
-                self._do_sync_account(account_id)
-                # Sucesso — reseta backoff do host
-                self._reset_backoff(host)
-            finally:
-                host_lock.release()
-        finally:
-            with self._sync_lock:
-                self._syncing_accounts.discard(account_id)
-
-    def _is_host_in_backoff(self, host: str) -> bool:
-        if host not in self._host_errors:
-            return False
-        _, ts = self._host_errors[host]
-        wait = self._backoff_secs.get(host, self.BACKOFF_INITIAL)
-        return (time.time() - ts) < wait
-
-    def _backoff_remaining(self, host: str) -> float:
-        if host not in self._host_errors:
-            return 0
-        _, ts = self._host_errors[host]
-        wait = self._backoff_secs.get(host, self.BACKOFF_INITIAL)
-        return max(0, wait - (time.time() - ts))
-
-    def _register_host_error(self, host: str, error: str):
-        """Registra erro e aplica backoff exponencial ao host."""
-        current = self._backoff_secs.get(host, self.BACKOFF_INITIAL)
-        next_backoff = min(current * 2, self.BACKOFF_MAX)
-        self._backoff_secs[host] = next_backoff
-        self._host_errors[host] = (error, time.time())
-        log.warning(f'Host {host} em backoff por {next_backoff}s após erro: {error}')
-
-    def _reset_backoff(self, host: str):
-        self._host_errors.pop(host, None)
-        self._backoff_secs.pop(host, None)
-
-    def _do_sync_account(self, account_id: int):
+        """
+        Sync manual: busca e-mails novos em TODAS as pastas.
+        Usado pelo botão de sync manual — IDLE já cuida da INBOX automaticamente.
+        """
         from database import db as _db, Account as _Account
         account = _Account.query.get(account_id)
         if not account:
             return
 
-        log.info(f'Sync {account.email}')
+        log.info(f'Sync manual {account.email}')
         self._emit('sync_start', {'account_id': account_id, 'email': account.email})
         self._folder_cache.pop(account_id, None)
 
         try:
             folders = self._get_sync_folders(account)
-            log.info(f'Pastas para sync: {folders}')
             total_new = 0
             total_flag_changes = 0
 
@@ -405,18 +749,12 @@ class MailService:
         except Exception as e:
             log.error(f'sync_account error: {e}')
             _pool.invalidate(account_id)
-            err_str = str(e)
-            # Detecta erros que indicam rate limit ou bloqueio do servidor
-            if any(kw in err_str.lower() for kw in
-                   ['too many', 'rate', 'limit', 'blocked', 'banned',
-                    'connection refused', 'login failed', 'authentication']):
-                self._register_host_error(account.imap_host, err_str)
-            self._emit('sync_error', {'account_id': account_id, 'error': err_str})
+            self._emit('sync_error', {'account_id': account_id, 'error': str(e)})
 
     def _sync_folder(self, account: Account, folder: str):
-        """Retorna (new_count, flag_change_count)."""
+        """Sync de uma pasta. Retorna (new_count, flag_change_count)."""
         from database import db as _db
-        new_count = 0
+        new_count    = 0
         flag_changes = 0
 
         try:
@@ -425,10 +763,8 @@ class MailService:
 
             status, _ = self._safe_exec(account, _select)
             if status != 'OK':
-                log.warning(f'Não foi possível selecionar: {folder}')
                 return 0, 0
 
-            # ── 1. Busca todos os UIDs do servidor ────────────────────────────
             def _search(conn):
                 return conn.uid('search', None, 'ALL')
 
@@ -436,19 +772,15 @@ class MailService:
             all_uids_bytes = data[0].split() if data[0] else []
             all_uids_server = {int(u) for u in all_uids_bytes}
 
-            # ── 2. UIDs existentes no banco ────────────────────────────────────
             existing_rows = (
                 _db.session.query(Email.uid, Email.id, Email.is_read)
-                    .filter_by(account_id=account.id, folder=folder)
-                    .all()
+                    .filter_by(account_id=account.id, folder=folder).all()
             )
-            existing_uid_map = {row.uid: {'id': row.id, 'is_read': row.is_read} for row in existing_rows}
+            existing_uid_map = {row.uid: {'id': row.id, 'is_read': row.is_read}
+                                for row in existing_rows}
             existing_uids = set(existing_uid_map.keys())
 
-            # ── 3. Novos UIDs: baixa body completo ────────────────────────────
-            new_uids_int = list(all_uids_server - existing_uids)
-            # Limita aos 200 mais recentes
-            new_uids_int = sorted(new_uids_int)[-200:]
+            new_uids_int = sorted(list(all_uids_server - existing_uids))[-200:]
 
             if new_uids_int:
                 uid_str = ','.join(str(u) for u in new_uids_int)
@@ -457,7 +789,6 @@ class MailService:
                     return conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
 
                 _, msg_data = self._safe_exec(account, _fetch)
-
                 batch = []
                 i = 0
                 while i < len(msg_data):
@@ -465,7 +796,6 @@ class MailService:
                     if not isinstance(item, tuple):
                         i += 1
                         continue
-
                     meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
                     raw  = item[1]
                     uid_match = re.search(r'UID (\d+)', meta)
@@ -477,53 +807,22 @@ class MailService:
                     is_read = '\\Seen' in meta
 
                     try:
-                        msg = email_lib.message_from_bytes(raw, policy=email_policy.compat32)
-
-                        subject     = _decode_header_value(msg.get('Subject', ''))
-                        from_full   = _decode_header_value(msg.get('From', ''))
-                        from_name, from_addr = parseaddr(from_full)
-                        to_addr     = _decode_header_value(msg.get('To', ''))
-                        cc_addr     = _decode_header_value(msg.get('Cc', ''))
-                        reply_to    = _decode_header_value(msg.get('Reply-To', ''))
-                        message_id  = (msg.get('Message-ID') or '').strip()
-                        in_reply_to = (msg.get('In-Reply-To') or '').strip()
-
-                        try:
-                            date = parsedate_to_datetime(msg.get('Date', ''))
-                            if date.tzinfo:
-                                date = date.replace(tzinfo=None)
-                        except Exception:
-                            date = datetime.utcnow()
-
-                        body_text, body_html = _get_body(msg)
-                        att_data = _get_attachments(msg)
-
-                        email_obj = Email(
-                            account_id=account.id, folder=folder, uid=uid,
-                            message_id=message_id, in_reply_to=in_reply_to,
-                            subject=subject or '(sem assunto)',
-                            from_addr=from_addr, from_name=from_name,
-                            to_addr=to_addr, cc_addr=cc_addr, reply_to=reply_to,
-                            date=date, body_text=body_text, body_html=body_html,
-                            is_read=is_read, has_attachments=bool(att_data),
+                        email_obj, att_data = _parse_email_from_raw(
+                            raw, uid, folder, account.id, is_read
                         )
                         batch.append((email_obj, att_data))
                         new_count += 1
-
                         if len(batch) >= BATCH_SIZE:
                             self._flush_batch(_db, account, batch)
                             batch = []
-
                     except Exception as e:
                         log.warning(f'Parse error UID {uid}: {e}')
-
                     i += 1
 
                 if batch:
                     self._flush_batch(_db, account, batch)
 
-            # ── 4. UIDs existentes: sync incremental de flags ──────────────────
-            # Só verifica os 500 UIDs mais recentes para não sobrecarregar
+            # Sync flags dos 500 UIDs mais recentes
             uids_to_check = sorted(existing_uids & all_uids_server)[-500:]
             if uids_to_check:
                 uid_str = ','.join(str(u) for u in uids_to_check)
@@ -554,13 +853,11 @@ class MailService:
                             )
                         _db.session.commit()
                         flag_changes = len(updates)
-                        log.info(f'{folder}: {flag_changes} flags atualizadas')
-                        if flag_changes > 0:
-                            self._emit('flags_updated', {
-                                'account_id': account.id,
-                                'folder': folder,
-                                'updates': [{'id': eid, 'is_read': r} for eid, r in updates],
-                            })
+                        self._emit('flags_updated', {
+                            'account_id': account.id,
+                            'folder': folder,
+                            'updates': [{'id': eid, 'is_read': r} for eid, r in updates],
+                        })
                 except Exception as e:
                     log.warning(f'Flag sync error for {folder}: {e}')
 
@@ -568,8 +865,7 @@ class MailService:
             log.error(f'_sync_folder {folder} error: {e}')
             _pool.invalidate(account.id)
             try:
-                from database import db as _db2
-                _db2.session.rollback()
+                _db.session.rollback()
             except Exception:
                 pass
 
@@ -583,23 +879,35 @@ class MailService:
 
             for email_obj, att_data in batch:
                 for a in att_data:
-                    _db.session.add(Attachment(
+                    att = Attachment(
                         email_id=email_obj.id,
                         filename=a['filename'],
                         content_type=a['content_type'],
                         size=a['size'],
-                        data=a['data'],
-                    ))
+                    )
+                    try:
+                        att.save_to_disk(a['data'])
+                    except Exception as e:
+                        log.warning(f'Falha ao salvar anexo em disco: {e}')
+                        att.data = a['data']
+                    _db.session.add(att)
 
             _db.session.commit()
 
+            filters = list(
+                EmailFilter.query.filter_by(account_id=account.id, enabled=True)
+                    .order_by(EmailFilter.priority.asc()).all()
+            )
             for email_obj, _ in batch:
-                if email_obj.folder.upper() == 'INBOX':
-                    self._emit('new_email', {
-                        'account_id': account.id,
-                        'folder':     email_obj.folder,
-                        'email':      email_obj.to_list_dict(),
-                    })
+                self._apply_filters(email_obj, filters)
+                self._emit('new_email', {
+                    'account_id': account.id,
+                    'folder':     email_obj.folder,
+                    'email':      email_obj.to_list_dict(),
+                })
+
+            enforce_email_limit(account.id)
+
         except Exception as e:
             log.error(f'_flush_batch error: {e}')
             try:
@@ -607,7 +915,121 @@ class MailService:
             except Exception:
                 pass
 
-    # ── Flag operations ────────────────────────────────────────────────────────
+    def _apply_filters(self, email_obj: Email, filters: list):
+        from database import db as _db
+        for f in filters:
+            if not f.matches(email_obj):
+                continue
+            changed = False
+            if f.action_mark_read and not email_obj.is_read:
+                email_obj.is_read = True
+                changed = True
+            if f.action_star and not email_obj.is_starred:
+                email_obj.is_starred = True
+                changed = True
+            if f.action_delete:
+                self.delete_email(email_obj)
+                _db.session.delete(email_obj)
+                _db.session.commit()
+                return
+            if f.action_move_to and email_obj.folder != f.action_move_to:
+                self.move_email(email_obj, f.action_move_to)
+                changed = True
+            if changed:
+                try:
+                    _db.session.commit()
+                except Exception:
+                    _db.session.rollback()
+            break
+
+    # ── IMAP Search ───────────────────────────────────────────────────────────
+
+    def search_imap(self, account_id: int, folder: str, query: str):
+        from database import db as _db, Account as _Account
+        account = _Account.query.get(account_id)
+        if not account:
+            return
+
+        self._emit('imap_search_start', {'account_id': account_id, 'query': query})
+        try:
+            def _select(conn):
+                return conn.select(f'"{folder}"', readonly=True)
+            status, _ = self._safe_exec(account, _select)
+            if status != 'OK':
+                self._emit('imap_search_done', {
+                    'account_id': account_id, 'found': 0,
+                    'error': f'Pasta {folder} inacessível'
+                })
+                return
+
+            safe_q = query.replace('"', '')
+            criterion = f'TEXT "{safe_q}"'
+
+            def _search(conn):
+                return conn.uid('search', None, criterion)
+            _, data = self._safe_exec(account, _search)
+            uids = data[0].split() if data[0] else []
+
+            if not uids:
+                self._emit('imap_search_done', {'account_id': account_id, 'found': 0})
+                return
+
+            existing = set(
+                row[0] for row in
+                _db.session.query(Email.uid)
+                    .filter_by(account_id=account_id, folder=folder).all()
+            )
+            new_uids = [u for u in uids if int(u) not in existing]
+
+            if new_uids:
+                uid_str = ','.join(u.decode() for u in new_uids[:100])
+                def _fetch(conn):
+                    return conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
+                _, msg_data = self._safe_exec(account, _fetch)
+
+                batch = []
+                i = 0
+                while i < len(msg_data):
+                    item = msg_data[i]
+                    if not isinstance(item, tuple):
+                        i += 1
+                        continue
+                    meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
+                    raw  = item[1]
+                    uid_match = re.search(r'UID (\d+)', meta)
+                    if not uid_match:
+                        i += 1
+                        continue
+                    uid     = int(uid_match.group(1))
+                    is_read = '\\Seen' in meta
+                    try:
+                        email_obj, att_data = _parse_email_from_raw(
+                            raw, uid, folder, account_id, is_read
+                        )
+                        batch.append((email_obj, att_data))
+                        if len(batch) >= BATCH_SIZE:
+                            self._flush_batch(_db, account, batch)
+                            batch = []
+                    except Exception as e:
+                        log.warning(f'search_imap parse error UID {uid}: {e}')
+                    i += 1
+                if batch:
+                    self._flush_batch(_db, account, batch)
+
+            self._emit('imap_search_done', {
+                'account_id': account_id,
+                'found': len(uids),
+                'new': len(new_uids),
+                'folder': folder,
+                'query': query,
+            })
+        except Exception as e:
+            log.error(f'search_imap error: {e}')
+            self._emit('imap_search_done', {
+                'account_id': account_id, 'found': 0, 'error': str(e)
+            })
+
+    # ── Flag operations ───────────────────────────────────────────────────────
 
     def mark_read_on_server(self, email_obj: Email):
         try:
@@ -633,7 +1055,6 @@ class MailService:
             account = email_obj.account
             target  = self._find_folder(account, ['spam', 'junk']) if mark_as_spam else 'INBOX'
             if not target:
-                log.warning('Pasta de spam não encontrada')
                 return False
             if email_obj.folder.lower() == target.lower():
                 return True
@@ -679,9 +1100,19 @@ class MailService:
     # ── Send ──────────────────────────────────────────────────────────────────
 
     def send_email(self, account: Account, to: str, cc: str, bcc: str,
-                   subject: str, body: str, reply_to_id=None, attachments=None):
+                   subject: str, body: str, body_html: str = '',
+                   reply_to_id=None, attachments=None):
         try:
-            msg = MIMEMultipart('mixed')
+            if body_html:
+                msg      = MIMEMultipart('mixed')
+                alt_part = MIMEMultipart('alternative')
+                alt_part.attach(MIMEText(body or '', 'plain', 'utf-8'))
+                alt_part.attach(MIMEText(body_html, 'html', 'utf-8'))
+                msg.attach(alt_part)
+            else:
+                msg = MIMEMultipart('mixed')
+                msg.attach(MIMEText(body or '', 'plain', 'utf-8'))
+
             msg['From']    = f'{account.name} <{account.email}>'
             msg['To']      = to
             if cc: msg['Cc'] = cc
@@ -693,8 +1124,6 @@ class MailService:
                     msg['In-Reply-To'] = orig.message_id
                     msg['References']  = orig.message_id
 
-            msg.attach(MIMEText(body, 'plain', 'utf-8'))
-
             if attachments:
                 for f in attachments:
                     if not f or not f.filename:
@@ -703,7 +1132,8 @@ class MailService:
                     part = MIMEBase('application', 'octet-stream')
                     part.set_payload(data)
                     encoders.encode_base64(part)
-                    part.add_header('Content-Disposition', f'attachment; filename="{f.filename}"')
+                    part.add_header('Content-Disposition',
+                                    f'attachment; filename="{f.filename}"')
                     msg.attach(part)
 
             recipients = [r.strip() for r in to.split(',') if r.strip()]
@@ -720,7 +1150,6 @@ class MailService:
             s.sendmail(account.email, recipients, msg.as_string())
             s.quit()
 
-            # Salva na pasta Sent via pool
             try:
                 sent_folder = self._find_folder(account, ['sent'])
                 if sent_folder:
