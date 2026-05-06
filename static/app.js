@@ -273,14 +273,30 @@ function renderComposeAccountSelect() {
 
 // ── Account tree ───────────────────────────────────────────────────────────────
 
+// Aliases conhecidos por tipo de pasta — suporta Gmail, Dovecot, Exchange, Yahoo, etc.
 const FOLDER_DEFS = [
-  { key: 'inbox',   label: 'Entrada',   icon: '📥', keywords: ['inbox'] },
-  { key: 'drafts',  label: 'Rascunhos', icon: '📝', keywords: ['draft'] },
-  { key: 'sent',    label: 'Enviados',  icon: '📤', keywords: ['sent'] },
-  { key: 'spam',    label: 'Spam',      icon: '🔥', keywords: ['spam', 'junk'] },
-  { key: 'trash',   label: 'Lixeira',   icon: '🗑',  keywords: ['trash'] },
-  { key: 'archive', label: 'Arquivo',   icon: '📦', keywords: ['archive'] },
+  { key: 'inbox',   label: 'Entrada',   icon: '📥', match: f => /^inbox$/i.test(f) },
+  { key: 'drafts',  label: 'Rascunhos', icon: '📝', match: f => /draft/i.test(f) },
+  { key: 'sent',    label: 'Enviados',  icon: '📤', match: f => /^sent$|sent (mail|items|messages)|\.(sent)$/i.test(f) || /^\[gmail\]\/sent/i.test(f) },
+  { key: 'spam',    label: 'Spam',      icon: '🔥', match: f => /spam|junk/i.test(f) },
+  { key: 'trash',   label: 'Lixeira',   icon: '🗑',  match: f => /trash|deleted|lixeira/i.test(f) || /^\[gmail\]\/trash/i.test(f) },
+  { key: 'archive', label: 'Arquivo',   icon: '📦', match: f => /archive|all mail/i.test(f) || /^\[gmail\]\/all/i.test(f) },
 ];
+
+// Retorna qual def mapeia essa pasta, ou null
+function matchFolderDef(folderName) {
+  // Inbox é especial: só bate se for exatamente INBOX ou INBOX com prefixo de namespace
+  // mas NÃO bate em INBOX.Sent, INBOX.Drafts etc
+  for (const def of FOLDER_DEFS) {
+    if (def.key === 'inbox') {
+      // Aceita: INBOX, inbox — rejeita: INBOX.Sent, INBOX.Drafts etc
+      if (/^inbox$/i.test(folderName)) return def;
+    } else {
+      if (def.match(folderName)) return def;
+    }
+  }
+  return null;
+}
 
 function getAccountUnread(accountId) {
   // Badge da conta = soma de não lidos de TODAS as pastas
@@ -332,14 +348,7 @@ function renderAccountTree() {
     const realFolderKeys = Object.keys(counts);
 
     for (const def of FOLDER_DEFS) {
-      const matching = realFolderKeys.filter(f => {
-        const fl = f.toLowerCase();
-        return def.keywords.some(kw => {
-          // Match exato (ex: 'inbox') OU sufixo após ponto (ex: 'inbox.sent' -> 'sent')
-          const suffix = fl.includes('.') ? fl.split('.').pop() : fl;
-          return fl === kw || suffix === kw || suffix.startsWith(kw);
-        });
-      });
+      const matching = realFolderKeys.filter(f => matchFolderDef(f)?.key === def.key);
       matching.forEach(f => seen.add(f));
 
       const totalC  = matching.reduce((s, f) => s + (counts[f]?.total  || 0), 0);
@@ -426,12 +435,7 @@ function realFoldersFor(folderKey, accountId) {
   const counts = folderCountsData[accountId] || {};
   const def    = FOLDER_DEFS.find(d => d.key === folderKey);
   if (!def) return [folderKey];
-  // Match por sufixo: INBOX -> 'inbox', INBOX.Sent -> 'sent', INBOX.Drafts -> 'drafts'
-  const matching = Object.keys(counts).filter(f => {
-    const fl = f.toLowerCase();
-    const suffix = fl.includes('.') ? fl.split('.').pop() : fl;
-    return def.keywords.some(kw => fl === kw || suffix === kw || suffix.startsWith(kw));
-  });
+  const matching = Object.keys(counts).filter(f => matchFolderDef(f)?.key === def.key);
   return matching.length ? matching : (folderKey === 'inbox' ? ['INBOX'] : [folderKey]);
 }
 
