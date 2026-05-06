@@ -697,7 +697,6 @@ def get_idle_status():
         }
     return jsonify({'status': 'running', 'accounts': result})
 
-
 @app.route('/api/accounts/<int:account_id>/idle-restart', methods=['POST'])
 def restart_idle(account_id):
     Account.query.get_or_404(account_id)
