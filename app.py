@@ -9,7 +9,7 @@ from pathlib import Path
 
 from database import db, Account, Email, Attachment, EmailFilter, \
     MAX_ACCOUNTS, ATTACHMENTS_DIR, enforce_email_limit
-from mail_service import MailService
+from mail_service import MailService, IMAPIdleManager
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -27,10 +27,10 @@ os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 db.init_app(app)
 socketio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
 mail_service = MailService(db, socketio)
+idle_manager = None  # inicializado após o app subir
 
 with app.app_context():
     db.create_all()
-    # Migrations incrementais
     with db.engine.connect() as conn:
         migrations = [
             "ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)",
@@ -43,7 +43,6 @@ with app.app_context():
                 conn.commit()
             except Exception:
                 pass
-        # Índices
         try:
             conn.execute(db.text(
                 "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date "
@@ -52,6 +51,9 @@ with app.app_context():
             conn.commit()
         except Exception:
             pass
+
+# Inicializa IDLE após criar o contexto
+mail_service.init_idle(app)
 
 
 # ── .conf helpers ──────────────────────────────────────────────────────────────
@@ -120,27 +122,23 @@ def _sync_conf_to_db():
         account = Account.query.filter_by(email=email).first()
 
         if account:
-            account.name      = name
-            account.username  = username
-            account.imap_host = imap_host
-            account.imap_port = imap_port
-            account.imap_ssl  = imap_ssl
-            account.smtp_host = smtp_host
-            account.smtp_port = smtp_port
-            account.smtp_ssl  = smtp_ssl
-            account.smtp_tls  = smtp_tls
-            account.conf_file = conf_path.name
+            account.name = name; account.username = username
+            account.imap_host = imap_host; account.imap_port = imap_port
+            account.imap_ssl = imap_ssl; account.smtp_host = smtp_host
+            account.smtp_port = smtp_port; account.smtp_ssl = smtp_ssl
+            account.smtp_tls = smtp_tls; account.conf_file = conf_path.name
             if raw_pass and not raw_pass.startswith('enc:'):
                 account.set_password(raw_pass)
             db.session.commit()
             result['updated'].append(email)
+            # Reinicia IDLE com credenciais atualizadas
+            mail_service.restart_idle_for(account.id)
         else:
-            # Verifica limite
             if Account.query.count() >= MAX_ACCOUNTS:
                 result['errors'].append(f'{conf_path.name}: limite de {MAX_ACCOUNTS} contas atingido')
                 continue
             if not raw_pass:
-                result['errors'].append(f'{conf_path.name}: campo "pass" ausente para nova conta')
+                result['errors'].append(f'{conf_path.name}: campo "pass" ausente')
                 continue
             account = Account(
                 name=name, email=email, username=username,
@@ -152,10 +150,11 @@ def _sync_conf_to_db():
             db.session.add(account)
             db.session.commit()
             result['created'].append(email)
+            # Inicia IDLE para a nova conta
+            mail_service.start_idle_for(account.id)
 
         if raw_pass and not raw_pass.startswith('enc:'):
-            encrypted = account.password_enc
-            data['pass'] = f'enc:{encrypted}'
+            data['pass'] = f'enc:{account.password_enc}'
             _write_conf(conf_path, data)
 
     all_accounts = Account.query.all()
@@ -163,6 +162,7 @@ def _sync_conf_to_db():
         if account.conf_file and account.email.lower() not in conf_emails:
             conf_path = ACCOUNTS_DIR / account.conf_file
             if not conf_path.exists():
+                mail_service.stop_idle_for(account.id)
                 db.session.delete(account)
                 db.session.commit()
                 result['deleted'].append(account.email)
@@ -172,16 +172,13 @@ def _sync_conf_to_db():
 
 def _account_to_conf_data(account: Account) -> dict:
     return {
-        'email':     account.email,
-        'user':      account.username,
-        'pass':      f'enc:{account.password_enc}',
-        'imap_host': account.imap_host,
-        'imap_port': str(account.imap_port),
-        'imap_ssl':  'true' if account.imap_ssl else 'false',
-        'smtp_host': account.smtp_host,
-        'smtp_port': str(account.smtp_port),
-        'smtp_ssl':  'true' if account.smtp_ssl else 'false',
-        'smtp_tls':  'true' if account.smtp_tls else 'false',
+        'email': account.email, 'user': account.username,
+        'pass': f'enc:{account.password_enc}',
+        'imap_host': account.imap_host, 'imap_port': str(account.imap_port),
+        'imap_ssl': 'true' if account.imap_ssl else 'false',
+        'smtp_host': account.smtp_host, 'smtp_port': str(account.smtp_port),
+        'smtp_ssl': 'true' if account.smtp_ssl else 'false',
+        'smtp_tls': 'true' if account.smtp_tls else 'false',
     }
 
 
@@ -203,9 +200,9 @@ def get_accounts():
 def create_account():
     if Account.query.count() >= MAX_ACCOUNTS:
         return jsonify({'error': f'Limite de {MAX_ACCOUNTS} contas atingido'}), 400
-
     data = request.json
-    required = ['name', 'email', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port', 'username', 'password']
+    required = ['name', 'email', 'imap_host', 'imap_port',
+                'smtp_host', 'smtp_port', 'username', 'password']
     for field in required:
         if not data.get(field):
             return jsonify({'error': f'Campo obrigatório: {field}'}), 400
@@ -216,7 +213,6 @@ def create_account():
         while (ACCOUNTS_DIR / conf_filename).exists():
             conf_filename = f'{base}_{counter}.conf'
             counter += 1
-
         account = Account(
             name=data['name'], email=data['email'],
             imap_host=data['imap_host'], imap_port=int(data['imap_port']),
@@ -229,6 +225,7 @@ def create_account():
         db.session.add(account)
         db.session.commit()
         _write_conf(ACCOUNTS_DIR / conf_filename, _account_to_conf_data(account))
+        mail_service.start_idle_for(account.id)
         return jsonify(account.to_dict()), 201
     except Exception as e:
         db.session.rollback()
@@ -257,12 +254,17 @@ def update_account(account_id):
         account.conf_file = new_conf_filename
     db.session.commit()
     _write_conf(ACCOUNTS_DIR / account.conf_file, _account_to_conf_data(account))
+    # Reinicia IDLE com novas credenciais
+    mail_service.restart_idle_for(account_id)
     return jsonify(account.to_dict())
 
 
 @app.route('/api/accounts/<int:account_id>', methods=['DELETE'])
 def delete_account(account_id):
     account = Account.query.get_or_404(account_id)
+    mail_service.stop_idle_for(account_id)
+    if idle_manager:
+        idle_manager.stop_account(account_id)
     if account.conf_file:
         conf_path = ACCOUNTS_DIR / account.conf_file
         if conf_path.exists():
@@ -275,7 +277,7 @@ def delete_account(account_id):
 @app.route('/api/accounts/<int:account_id>/purge', methods=['DELETE'])
 def purge_account(account_id):
     account = Account.query.get_or_404(account_id)
-    # Deleta anexos em disco
+    mail_service.stop_idle_for(account_id)
     for email in account.emails:
         for att in email.attachments:
             att.delete_from_disk()
@@ -296,6 +298,7 @@ def test_account(account_id):
 
 @app.route('/api/accounts/<int:account_id>/sync', methods=['POST'])
 def sync_account(account_id):
+    """Sync manual — busca e-mails em todas as pastas (não só INBOX)."""
     Account.query.get_or_404(account_id)
     def run():
         with app.app_context():
@@ -317,6 +320,30 @@ def sync_all():
 @app.route('/api/accounts/sync-conf', methods=['POST'])
 def sync_conf():
     return jsonify(_sync_conf_to_db())
+
+
+@app.route('/api/accounts/<int:account_id>/idle-restart', methods=['POST'])
+def restart_idle(account_id):
+    """Reinicia a conexão IDLE de uma conta (útil para debug)."""
+    Account.query.get_or_404(account_id)
+    mail_service.restart_idle_for(account_id)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/idle/status', methods=['GET'])
+def idle_status():
+    """Retorna status das conexões IDLE por conta."""
+    if not mail_service.idle_manager:
+        return jsonify({'error': 'IDLE não inicializado'})
+    mgr = mail_service.idle_manager
+    result = {}
+    for account in Account.query.all():
+        t = mgr._threads.get(account.id)
+        result[account.id] = {
+            'email':   account.email,
+            'running': t is not None and t.is_alive(),
+        }
+    return jsonify(result)
 
 
 # ── Emails ─────────────────────────────────────────────────────────────────────
@@ -426,14 +453,14 @@ def send_email():
     return jsonify(result)
 
 
-# ── Bulk actions ───────────────────────────────────────────────────────────────
+# ── Bulk ───────────────────────────────────────────────────────────────────────
 
 @app.route('/api/emails/bulk', methods=['POST'])
 def bulk_action():
-    data      = request.json
-    action    = data.get('action')
-    ids       = data.get('ids', [])
-    folder    = data.get('folder', 'INBOX')
+    data       = request.json
+    action     = data.get('action')
+    ids        = data.get('ids', [])
+    folder     = data.get('folder', 'INBOX')
     account_id = data.get('account_id')
 
     if ids:
@@ -486,7 +513,6 @@ def move_email(email_id):
 
 @app.route('/api/threads/<path:thread_id>')
 def get_thread(thread_id):
-    """Retorna todos os e-mails de uma thread ordenados por data."""
     account_id = request.args.get('account_id', type=int)
     query = Email.query.filter_by(thread_id=thread_id)
     if account_id:
@@ -537,7 +563,7 @@ def download_attachment(attachment_id):
     )
 
 
-# ── Filtros/Regras ─────────────────────────────────────────────────────────────
+# ── Filtros ────────────────────────────────────────────────────────────────────
 
 @app.route('/api/accounts/<int:account_id>/filters', methods=['GET'])
 def get_filters(account_id):
@@ -583,7 +609,6 @@ def update_filter(filter_id):
         if field not in data:
             continue
         val = data[field]
-        # Strings vazias viram None; booleanos False são mantidos
         if field in STRING_NULLABLE:
             val = val or None
         elif field == 'cond_has_attach':
@@ -601,7 +626,7 @@ def delete_filter(filter_id):
     return jsonify({'ok': True})
 
 
-# ── Busca IMAP no servidor ─────────────────────────────────────────────────────
+# ── Busca IMAP ─────────────────────────────────────────────────────────────────
 
 @app.route('/api/accounts/<int:account_id>/search-imap', methods=['POST'])
 def search_imap(account_id):
@@ -617,7 +642,7 @@ def search_imap(account_id):
             mail_service.search_imap(account_id, folder, query)
 
     threading.Thread(target=run, daemon=True).start()
-    return jsonify({'ok': True, 'message': 'Busca iniciada no servidor'})
+    return jsonify({'ok': True})
 
 
 # ── Manutenção ─────────────────────────────────────────────────────────────────
@@ -634,6 +659,52 @@ def run_enforce_limit(account_id):
 @socketio.on('connect')
 def on_connect():
     log.info('Cliente conectado via WebSocket')
+
+
+def _start_idle_manager():
+    """Inicia o IDLE manager em background após o app estar pronto.
+    Delay de 3s para garantir que o SQLAlchemy e o SocketIO estão prontos."""
+    import time
+    time.sleep(3)
+    global idle_manager
+    try:
+        with app.app_context():
+            from database import Account as _Account
+            idle_manager = IMAPIdleManager(mail_service, app)
+            accounts = _Account.query.all()
+            log.info(f'Iniciando IDLE para {len(accounts)} conta(s)')
+            for account in accounts:
+                idle_manager.start_account(account.id)
+    except Exception as e:
+        log.error(f'Erro ao iniciar IDLE manager: {e}')
+
+# Inicia IDLE em thread daemon — não bloqueia o startup
+threading.Thread(target=_start_idle_manager, daemon=True, name='idle-starter').start()
+
+
+# ── Rotas de gestão do IDLE ────────────────────────────────────────────────────
+
+@app.route('/api/idle/status', methods=['GET'])
+def get_idle_status():
+    if not idle_manager:
+        return jsonify({'status': 'starting', 'accounts': {}})
+    result = {}
+    for account in Account.query.all():
+        t = idle_manager._threads.get(account.id)
+        result[str(account.id)] = {
+            'email':   account.email,
+            'running': t is not None and t.is_alive(),
+        }
+    return jsonify({'status': 'running', 'accounts': result})
+
+
+@app.route('/api/accounts/<int:account_id>/idle-restart', methods=['POST'])
+def restart_idle(account_id):
+    Account.query.get_or_404(account_id)
+    if idle_manager:
+        idle_manager.restart_account(account_id)
+        return jsonify({'ok': True})
+    return jsonify({'ok': False, 'error': 'IDLE manager não iniciado'})
 
 
 if __name__ == '__main__':
