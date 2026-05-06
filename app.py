@@ -5,10 +5,10 @@ import io
 import logging
 import os
 import re
-import configparser
 from pathlib import Path
 
-from database import db, Account, Email, Attachment
+from database import db, Account, Email, Attachment, EmailFilter, \
+    MAX_ACCOUNTS, ATTACHMENTS_DIR, enforce_email_limit
 from mail_service import MailService
 
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +22,7 @@ app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 
 ACCOUNTS_DIR = Path('/app/accounts')
 ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 db.init_app(app)
 socketio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
@@ -29,10 +30,25 @@ mail_service = MailService(db, socketio)
 
 with app.app_context():
     db.create_all()
-    # Migration: adiciona conf_file se não existir
+    # Migrations incrementais
     with db.engine.connect() as conn:
+        migrations = [
+            "ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)",
+            "ALTER TABLE emails ADD COLUMN thread_id VARCHAR(500)",
+            "ALTER TABLE attachments ADD COLUMN file_path VARCHAR(1000)",
+        ]
+        for sql in migrations:
+            try:
+                conn.execute(db.text(sql))
+                conn.commit()
+            except Exception:
+                pass
+        # Índices
         try:
-            conn.execute(db.text("ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)"))
+            conn.execute(db.text(
+                "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date "
+                "ON emails (account_id, folder, date)"
+            ))
             conn.commit()
         except Exception:
             pass
@@ -87,15 +103,15 @@ def _sync_conf_to_db():
             continue
 
         conf_emails.add(email.lower())
-        username = data.get('user', email)
-        raw_pass = data.get('pass', '')
+        username  = data.get('user', email)
+        raw_pass  = data.get('pass', '')
         imap_host = data.get('imap_host', '')
         imap_port = int(data.get('imap_port', 993))
-        imap_ssl = data.get('imap_ssl', 'true').lower() in ('true', '1', 'yes')
+        imap_ssl  = data.get('imap_ssl', 'true').lower() in ('true', '1', 'yes')
         smtp_host = data.get('smtp_host', '')
         smtp_port = int(data.get('smtp_port', 587))
-        smtp_ssl = data.get('smtp_ssl', 'false').lower() in ('true', '1', 'yes')
-        smtp_tls = data.get('smtp_tls', 'true').lower() in ('true', '1', 'yes')
+        smtp_ssl  = data.get('smtp_ssl', 'false').lower() in ('true', '1', 'yes')
+        smtp_tls  = data.get('smtp_tls', 'true').lower() in ('true', '1', 'yes')
 
         if not imap_host or not smtp_host:
             result['errors'].append(f'{conf_path.name}: imap_host ou smtp_host ausente')
@@ -104,21 +120,25 @@ def _sync_conf_to_db():
         account = Account.query.filter_by(email=email).first()
 
         if account:
-            account.name = name
-            account.username = username
+            account.name      = name
+            account.username  = username
             account.imap_host = imap_host
             account.imap_port = imap_port
-            account.imap_ssl = imap_ssl
+            account.imap_ssl  = imap_ssl
             account.smtp_host = smtp_host
             account.smtp_port = smtp_port
-            account.smtp_ssl = smtp_ssl
-            account.smtp_tls = smtp_tls
+            account.smtp_ssl  = smtp_ssl
+            account.smtp_tls  = smtp_tls
             account.conf_file = conf_path.name
             if raw_pass and not raw_pass.startswith('enc:'):
                 account.set_password(raw_pass)
             db.session.commit()
             result['updated'].append(email)
         else:
+            # Verifica limite
+            if Account.query.count() >= MAX_ACCOUNTS:
+                result['errors'].append(f'{conf_path.name}: limite de {MAX_ACCOUNTS} contas atingido')
+                continue
             if not raw_pass:
                 result['errors'].append(f'{conf_path.name}: campo "pass" ausente para nova conta')
                 continue
@@ -152,16 +172,16 @@ def _sync_conf_to_db():
 
 def _account_to_conf_data(account: Account) -> dict:
     return {
-        'email': account.email,
-        'user': account.username,
-        'pass': f'enc:{account.password_enc}',
+        'email':     account.email,
+        'user':      account.username,
+        'pass':      f'enc:{account.password_enc}',
         'imap_host': account.imap_host,
         'imap_port': str(account.imap_port),
-        'imap_ssl': 'true' if account.imap_ssl else 'false',
+        'imap_ssl':  'true' if account.imap_ssl else 'false',
         'smtp_host': account.smtp_host,
         'smtp_port': str(account.smtp_port),
-        'smtp_ssl': 'true' if account.smtp_ssl else 'false',
-        'smtp_tls': 'true' if account.smtp_tls else 'false',
+        'smtp_ssl':  'true' if account.smtp_ssl else 'false',
+        'smtp_tls':  'true' if account.smtp_tls else 'false',
     }
 
 
@@ -181,6 +201,9 @@ def get_accounts():
 
 @app.route('/api/accounts', methods=['POST'])
 def create_account():
+    if Account.query.count() >= MAX_ACCOUNTS:
+        return jsonify({'error': f'Limite de {MAX_ACCOUNTS} contas atingido'}), 400
+
     data = request.json
     required = ['name', 'email', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port', 'username', 'password']
     for field in required:
@@ -252,6 +275,10 @@ def delete_account(account_id):
 @app.route('/api/accounts/<int:account_id>/purge', methods=['DELETE'])
 def purge_account(account_id):
     account = Account.query.get_or_404(account_id)
+    # Deleta anexos em disco
+    for email in account.emails:
+        for att in email.attachments:
+            att.delete_from_disk()
     if account.conf_file:
         conf_path = ACCOUNTS_DIR / account.conf_file
         if conf_path.exists():
@@ -269,7 +296,7 @@ def test_account(account_id):
 
 @app.route('/api/accounts/<int:account_id>/sync', methods=['POST'])
 def sync_account(account_id):
-    account = Account.query.get_or_404(account_id)
+    Account.query.get_or_404(account_id)
     def run():
         with app.app_context():
             mail_service.sync_account(account_id)
@@ -297,16 +324,19 @@ def sync_conf():
 @app.route('/api/emails')
 def get_emails():
     account_id = request.args.get('account_id', type=int)
-    folder = request.args.get('folder', 'INBOX')
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
-    search = request.args.get('search', '').strip()
+    folder     = request.args.get('folder', 'INBOX')
+    page       = request.args.get('page', 1, type=int)
+    per_page   = request.args.get('per_page', 50, type=int)
+    search     = request.args.get('search', '').strip()
+    thread_id  = request.args.get('thread_id', '').strip()
 
     query = Email.query
     if account_id:
         query = query.filter_by(account_id=account_id)
     if folder:
         query = query.filter_by(folder=folder)
+    if thread_id:
+        query = query.filter_by(thread_id=thread_id)
     if search:
         like = f'%{search}%'
         query = query.filter(
@@ -317,9 +347,9 @@ def get_emails():
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
     return jsonify({
         'emails': [e.to_list_dict() for e in pagination.items],
-        'total': pagination.total,
-        'pages': pagination.pages,
-        'page': page,
+        'total':  pagination.total,
+        'pages':  pagination.pages,
+        'page':   page,
     })
 
 
@@ -368,6 +398,8 @@ def set_spam(email_id):
 def delete_email(email_id):
     email = Email.query.get_or_404(email_id)
     mail_service.delete_email(email)
+    for att in email.attachments:
+        att.delete_from_disk()
     db.session.delete(email)
     db.session.commit()
     return jsonify({'ok': True})
@@ -387,6 +419,7 @@ def send_email():
         bcc=request.form.get('bcc', ''),
         subject=request.form.get('subject', ''),
         body=request.form.get('body', ''),
+        body_html=request.form.get('body_html', ''),
         reply_to_id=request.form.get('reply_to_id', type=int),
         attachments=files,
     )
@@ -397,16 +430,15 @@ def send_email():
 
 @app.route('/api/emails/bulk', methods=['POST'])
 def bulk_action():
-    data = request.json
-    action = data.get('action')
-    ids = data.get('ids', [])          # lista de IDs, vazio = todos da pasta
-    folder = data.get('folder', 'INBOX')
+    data      = request.json
+    action    = data.get('action')
+    ids       = data.get('ids', [])
+    folder    = data.get('folder', 'INBOX')
     account_id = data.get('account_id')
 
     if ids:
         emails = Email.query.filter(Email.id.in_(ids)).all()
     else:
-        # todos da pasta
         query = Email.query.filter_by(folder=folder)
         if account_id:
             query = query.filter_by(account_id=account_id)
@@ -429,6 +461,8 @@ def bulk_action():
                 mail_service.set_spam(email, False)
             elif action == 'delete':
                 mail_service.delete_email(email)
+                for att in email.attachments:
+                    att.delete_from_disk()
                 db.session.delete(email)
             count += 1
         except Exception as e:
@@ -438,7 +472,7 @@ def bulk_action():
     return jsonify({'ok': True, 'count': count})
 
 
-@app.route('/api/emails/<int:email_id>/folders', methods=['POST'])
+@app.route('/api/emails/<int:email_id>/move', methods=['POST'])
 def move_email(email_id):
     email = Email.query.get_or_404(email_id)
     folder = request.json.get('folder')
@@ -446,6 +480,19 @@ def move_email(email_id):
         return jsonify({'error': 'folder obrigatório'}), 400
     mail_service.move_email(email, folder)
     return jsonify({'ok': True})
+
+
+# ── Threads ────────────────────────────────────────────────────────────────────
+
+@app.route('/api/threads/<path:thread_id>')
+def get_thread(thread_id):
+    """Retorna todos os e-mails de uma thread ordenados por data."""
+    account_id = request.args.get('account_id', type=int)
+    query = Email.query.filter_by(thread_id=thread_id)
+    if account_id:
+        query = query.filter_by(account_id=account_id)
+    emails = query.order_by(Email.date.asc()).all()
+    return jsonify([e.to_dict() for e in emails])
 
 
 # ── Folders ────────────────────────────────────────────────────────────────────
@@ -478,12 +525,108 @@ def folder_counts():
 @app.route('/api/attachments/<int:attachment_id>')
 def download_attachment(attachment_id):
     att = Attachment.query.get_or_404(attachment_id)
+    try:
+        data = att.get_data()
+    except FileNotFoundError:
+        abort(404)
     return send_file(
-        io.BytesIO(att.data),
+        io.BytesIO(data),
         download_name=att.filename,
         mimetype=att.content_type,
         as_attachment=True,
     )
+
+
+# ── Filtros/Regras ─────────────────────────────────────────────────────────────
+
+@app.route('/api/accounts/<int:account_id>/filters', methods=['GET'])
+def get_filters(account_id):
+    Account.query.get_or_404(account_id)
+    filters = EmailFilter.query.filter_by(account_id=account_id)\
+                               .order_by(EmailFilter.priority.asc()).all()
+    return jsonify([f.to_dict() for f in filters])
+
+
+@app.route('/api/accounts/<int:account_id>/filters', methods=['POST'])
+def create_filter(account_id):
+    Account.query.get_or_404(account_id)
+    data = request.json
+    if not data.get('name'):
+        return jsonify({'error': 'name obrigatório'}), 400
+    f = EmailFilter(
+        account_id=account_id,
+        name=data['name'],
+        enabled=data.get('enabled', True),
+        priority=data.get('priority', 0),
+        cond_from=data.get('cond_from') or None,
+        cond_to=data.get('cond_to') or None,
+        cond_subject=data.get('cond_subject') or None,
+        cond_has_attach=data.get('cond_has_attach') if data.get('cond_has_attach') is not None else None,
+        action_move_to=data.get('action_move_to') or None,
+        action_mark_read=data.get('action_mark_read', False),
+        action_star=data.get('action_star', False),
+        action_delete=data.get('action_delete', False),
+    )
+    db.session.add(f)
+    db.session.commit()
+    return jsonify(f.to_dict()), 201
+
+
+@app.route('/api/filters/<int:filter_id>', methods=['PUT'])
+def update_filter(filter_id):
+    f = EmailFilter.query.get_or_404(filter_id)
+    data = request.json
+    STRING_NULLABLE = {'cond_from', 'cond_to', 'cond_subject', 'action_move_to'}
+    for field in ['name', 'enabled', 'priority', 'cond_from', 'cond_to',
+                  'cond_subject', 'cond_has_attach', 'action_move_to',
+                  'action_mark_read', 'action_star', 'action_delete']:
+        if field not in data:
+            continue
+        val = data[field]
+        # Strings vazias viram None; booleanos False são mantidos
+        if field in STRING_NULLABLE:
+            val = val or None
+        elif field == 'cond_has_attach':
+            val = val if val is not None else None
+        setattr(f, field, val)
+    db.session.commit()
+    return jsonify(f.to_dict())
+
+
+@app.route('/api/filters/<int:filter_id>', methods=['DELETE'])
+def delete_filter(filter_id):
+    f = EmailFilter.query.get_or_404(filter_id)
+    db.session.delete(f)
+    db.session.commit()
+    return jsonify({'ok': True})
+
+
+# ── Busca IMAP no servidor ─────────────────────────────────────────────────────
+
+@app.route('/api/accounts/<int:account_id>/search-imap', methods=['POST'])
+def search_imap(account_id):
+    account = Account.query.get_or_404(account_id)
+    data    = request.json
+    query   = data.get('query', '').strip()
+    folder  = data.get('folder', 'INBOX')
+    if not query:
+        return jsonify({'error': 'query obrigatório'}), 400
+
+    def run():
+        with app.app_context():
+            mail_service.search_imap(account_id, folder, query)
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({'ok': True, 'message': 'Busca iniciada no servidor'})
+
+
+# ── Manutenção ─────────────────────────────────────────────────────────────────
+
+@app.route('/api/accounts/<int:account_id>/enforce-limit', methods=['POST'])
+def run_enforce_limit(account_id):
+    Account.query.get_or_404(account_id)
+    removed = enforce_email_limit(account_id)
+    return jsonify({'ok': True, 'removed': removed})
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────

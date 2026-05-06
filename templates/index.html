@@ -23,6 +23,7 @@
 
     <div id="sidebar-footer">
       <div class="sidebar-action" onclick="openAccountModal()">⚙ Gerenciar contas</div>
+      <div class="sidebar-action" onclick="openFiltersModal()">🔧 Filtros / Regras</div>
       <div class="sidebar-divider"></div>
       <div class="sidebar-setting">
         <span class="sidebar-setting-label">Tema</span>
@@ -31,6 +32,10 @@
       <div class="sidebar-setting">
         <span class="sidebar-setting-label">Layout</span>
         <button id="toggle-layout" class="sidebar-setting-btn" onclick="toggleLayout()">⇔ Horizontal</button>
+      </div>
+      <div class="sidebar-setting">
+        <span class="sidebar-setting-label">Notif</span>
+        <button id="toggle-notif" onclick="toggleBrowserNotifications()">🔕 Notif: OFF</button>
       </div>
       <div class="sidebar-setting">
         <span class="sidebar-setting-label">Auto-sync</span>
@@ -43,6 +48,8 @@
           <option value="60">1 hora</option>
         </select>
       </div>
+      <div class="sidebar-divider"></div>
+      <div class="shortcuts-hint">j/k navegar · c compor · / buscar<br>s estrela · e excluir · u não lido</div>
     </div>
   </div>
 
@@ -56,6 +63,7 @@
           <span class="search-icon">🔍</span>
           <input id="search-input" type="text" placeholder="Buscar..." oninput="debounceSearch()" autocomplete="off">
         </div>
+        <button id="imap-search-btn" onclick="searchOnServer()" title="Buscar no servidor IMAP">🔍 Servidor</button>
         <button id="sync-btn" onclick="syncCurrent()" title="Sincronizar pasta">↻</button>
       </div>
 
@@ -67,6 +75,8 @@
         <button class="la-btn danger" onclick="bulkActionAll('delete')">🗑 Apagar todos</button>
       </div>
 
+      <div id="email-count-bar" style="padding:2px 10px;font-size:10px;color:var(--muted);background:var(--bg3);border-bottom:1px solid var(--line);min-height:18px;"></div>
+
       <div id="bulk-bar">
         <span id="bulk-count"></span>
         <button class="bulk-btn" onclick="bulkAction('mark_read')">✓ Lido</button>
@@ -77,7 +87,6 @@
         <button class="bulk-btn" onclick="deselectAll()" style="margin-left:auto">✕ Cancelar</button>
       </div>
 
-      <!-- Header de colunas (tabela) -->
       <div id="email-list-header">
         <div class="elh-col" style="cursor:default"></div>
         <div class="elh-col" style="cursor:default">⚑ 📎</div>
@@ -109,7 +118,6 @@
       </div>
 
       <div id="email-view">
-        <!-- Toolbar de ações -->
         <div id="ev-toolbar">
           <button class="ev-btn" onclick="replyEmail()">↩ Responder</button>
           <button class="ev-btn" onclick="replyAll()">↩↩ Resp. todos</button>
@@ -122,13 +130,13 @@
           <button class="ev-btn" onclick="markUnread()">✉ Não lido</button>
           <button class="ev-btn" id="ev-spam-btn" onclick="toggleSpam()">⚠ Spam</button>
           <button class="ev-btn danger" onclick="deleteEmail()">🗑 Excluir</button>
+          <button class="ev-btn" id="ev-thread-btn" onclick="">💬 Conversa</button>
           <div class="ev-sep"></div>
           <button class="ev-btn" id="ev-img-btn" onclick="toggleEmailImages()">🖼 Imgs: OFF</button>
           <button class="ev-btn active-toggle" id="ev-html-btn" onclick="setEmailViewMode('html')">HTML</button>
           <button class="ev-btn" id="ev-txt-btn" onclick="setEmailViewMode('text')">Texto</button>
         </div>
 
-        <!-- Cabeçalho do email -->
         <div id="ev-header">
           <div id="ev-subject"></div>
           <div id="ev-meta">
@@ -142,7 +150,6 @@
           </div>
         </div>
 
-        <!-- Banner de junk -->
         <div id="ev-junk-banner">
           <span>🔥</span>
           <span class="junk-banner-text">Este e-mail foi identificado como Spam.</span>
@@ -167,6 +174,10 @@
   <div id="compose-box">
     <div id="compose-header">
       <span id="compose-title">Nova mensagem</span>
+      <div class="compose-mode-tabs">
+        <button class="compose-tab active" id="tab-plain" onclick="setComposeMode('plain')">Texto</button>
+        <button class="compose-tab" id="tab-html" onclick="setComposeMode('html')">HTML</button>
+      </div>
       <button id="compose-close" onclick="closeCompose()">×</button>
     </div>
     <div id="compose-fields">
@@ -178,7 +189,41 @@
       <div class="compose-field"><span class="compose-label">Cc</span><input class="compose-input" id="compose-cc" type="text"></div>
       <div class="compose-field"><span class="compose-label">Assunto</span><input class="compose-input" id="compose-subject" type="text" placeholder="Assunto"></div>
     </div>
-    <div id="compose-body-wrap"><textarea id="compose-body" placeholder="Escreva sua mensagem..."></textarea></div>
+
+    <!-- Modo texto -->
+    <div id="compose-body-wrap">
+      <textarea id="compose-body" placeholder="Escreva sua mensagem..."></textarea>
+    </div>
+
+    <!-- Modo HTML — editor rico -->
+    <div id="compose-html-wrap" style="display:none;flex:1;display:none;flex-direction:column;min-height:0;">
+      <div id="compose-toolbar">
+        <button class="ced-btn" onclick="execCmd('bold')" title="Negrito"><b>B</b></button>
+        <button class="ced-btn" onclick="execCmd('italic')" title="Itálico"><i>I</i></button>
+        <button class="ced-btn" onclick="execCmd('underline')" title="Sublinhado"><u>U</u></button>
+        <div class="ced-sep"></div>
+        <button class="ced-btn" onclick="execCmd('justifyLeft')" title="Esquerda">⬅</button>
+        <button class="ced-btn" onclick="execCmd('justifyCenter')" title="Centro">☰</button>
+        <button class="ced-btn" onclick="execCmd('justifyRight')" title="Direita">➡</button>
+        <div class="ced-sep"></div>
+        <button class="ced-btn" onclick="execCmd('insertUnorderedList')" title="Lista">•</button>
+        <button class="ced-btn" onclick="execCmd('insertOrderedList')" title="Lista numerada">1.</button>
+        <div class="ced-sep"></div>
+        <button class="ced-btn" onclick="insertLink()" title="Link">🔗</button>
+        <button class="ced-btn" onclick="execCmd('removeFormat')" title="Limpar formatação">✕</button>
+        <div class="ced-sep"></div>
+        <select class="ced-select" onchange="execCmd('fontSize', this.value); this.value=''">
+          <option value="">Tamanho</option>
+          <option value="1">Pequeno</option>
+          <option value="3">Normal</option>
+          <option value="5">Grande</option>
+          <option value="7">Enorme</option>
+        </select>
+        <input type="color" class="ced-color" title="Cor do texto" onchange="execCmd('foreColor', this.value)">
+      </div>
+      <div id="compose-editor" contenteditable="true" spellcheck="true"></div>
+    </div>
+
     <div id="compose-footer">
       <button id="compose-send-btn" onclick="sendEmail()">Enviar</button>
       <button class="compose-attach-btn" onclick="document.getElementById('compose-file-input').click()">📎 Anexar</button>
@@ -229,6 +274,84 @@
       <button class="btn btn-ghost" onclick="closeAccountModal()">Cancelar</button>
       <button class="btn btn-ghost" id="af-test-btn" onclick="testAccount()">🔌 Testar</button>
       <button class="btn btn-primary" onclick="saveAccount()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ FILTERS MODAL ══ -->
+<div id="filters-modal">
+  <div id="filters-box">
+    <div id="filters-box-header">
+      <h2>Filtros / Regras</h2>
+      <button class="compose-close" onclick="closeFiltersModal()">×</button>
+    </div>
+    <div id="filters-box-body">
+
+      <!-- Seletor de conta -->
+      <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+        <label class="form-label" style="margin:0;white-space:nowrap;">Conta</label>
+        <select id="filter-account-select" class="form-input" style="flex:1" onchange="loadFilters()"></select>
+        <button class="btn btn-primary" style="padding:5px 12px;font-size:11px;white-space:nowrap" onclick="openFilterForm()">+ Novo filtro</button>
+      </div>
+
+      <!-- Lista de filtros existentes -->
+      <div id="filter-list"></div>
+
+      <hr class="form-divider" id="filter-form-divider" style="display:none">
+
+      <!-- Formulário de criação/edição -->
+      <div id="filter-form" style="display:none">
+        <div style="font-size:12px;font-weight:600;margin-bottom:10px;" id="filter-form-title">Novo filtro</div>
+
+        <div class="form-group">
+          <label class="form-label">Nome do filtro</label>
+          <input class="form-input" id="ff-name" type="text" placeholder="Ex: Newsletters">
+        </div>
+
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;">CONDIÇÕES (todas devem ser satisfeitas)</div>
+        <div class="form-row form-group" style="grid-template-columns:1fr 1fr;">
+          <div>
+            <label class="form-label">De contém</label>
+            <input class="form-input" id="ff-cond-from" type="text" placeholder="newsletter@">
+          </div>
+          <div>
+            <label class="form-label">Para contém</label>
+            <input class="form-input" id="ff-cond-to" type="text" placeholder="meu@email.com">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Assunto contém</label>
+          <input class="form-input" id="ff-cond-subject" type="text" placeholder="Promoção">
+        </div>
+        <div class="form-group" style="display:flex;gap:16px;">
+          <label class="form-check">
+            <input type="checkbox" id="ff-cond-attach"> Tem anexo
+          </label>
+        </div>
+
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;margin-top:8px;">AÇÕES</div>
+        <div class="form-group">
+          <label class="form-label">Mover para pasta</label>
+          <select id="ff-action-folder" class="form-input">
+            <option value="">— não mover —</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;" class="form-group">
+          <label class="form-check"><input type="checkbox" id="ff-action-read"> Marcar como lido</label>
+          <label class="form-check"><input type="checkbox" id="ff-action-star"> Estrelar</label>
+          <label class="form-check"><input type="checkbox" id="ff-action-delete"> Excluir</label>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;" class="form-group">
+          <label class="form-check"><input type="checkbox" id="ff-enabled" checked> Ativo</label>
+          <label class="form-label" style="margin:0">Prioridade</label>
+          <input class="form-input" id="ff-priority" type="number" value="0" style="width:70px">
+        </div>
+      </div>
+    </div>
+    <div id="filters-box-footer" style="display:none">
+      <button class="btn btn-ghost" onclick="closeFilterForm()">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveFilter()">Salvar filtro</button>
     </div>
   </div>
 </div>

@@ -7,6 +7,11 @@ services:
       - "15002:15002"
     volumes:
       - ./database:/app/database
+      - ./accounts:/app/accounts
+      - ./attachments:/app/database/attachments
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=America/Sao_Paulo
+      - MAX_EMAILS_PER_ACCOUNT=2000
+      - MAX_ACCOUNTS=20
+      - ATTACHMENTS_DIR=/app/database/attachments
