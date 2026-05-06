@@ -239,10 +239,12 @@ class IMAPIdleManager:
     Timeout: reenvia IDLE a cada 25 min (servidores encerram após 30 min)
     """
 
-    IDLE_TIMEOUT   = 25 * 60   # 25 minutos — renova antes do servidor desconectar
-    RECONNECT_BASE = 30        # segundos antes de tentar reconectar
-    RECONNECT_MAX  = 600       # backoff máximo 10 minutos
-    FOLDER         = 'INBOX'   # pasta a monitorar via IDLE
+    IDLE_TIMEOUT      = 10 * 60  # 10 minutos em IDLE depois desconecta
+    IDLE_PAUSE        = 5 * 60   # 5 minutos desconectado (Thunderbird pode usar)
+    OTHER_FOLDERS_INT = 60 * 60  # sync de outras pastas a cada 1 hora
+    RECONNECT_BASE    = 30       # backoff inicial em caso de erro
+    RECONNECT_MAX     = 600      # backoff máximo 10 minutos
+    FOLDER            = 'INBOX'  # pasta a monitorar via IDLE
 
     def __init__(self, mail_service, app):
         self._ms        = mail_service   # referência ao MailService
@@ -288,14 +290,31 @@ class IMAPIdleManager:
         self.start_account(account_id)
 
     def _idle_loop(self, account_id: int, stop: threading.Event):
-        """Loop principal de IDLE para uma conta. Roda em thread dedicada."""
+        """
+        Loop principal por conta:
+        1. Conecta e faz sync inicial completo (INBOX + outras pastas)
+        2. Entra em IDLE por IDLE_TIMEOUT segundos
+        3. Desconecta e espera IDLE_PAUSE segundos (libera conexão para outros clientes)
+        4. Repete — a cada OTHER_FOLDERS_INT também sincroniza outras pastas
+        """
         backoff = self.RECONNECT_BASE
+        last_full_sync = 0  # timestamp do último sync completo de outras pastas
 
         while not stop.is_set():
             try:
                 with self._app.app_context():
-                    self._run_idle_session(account_id, stop)
-                backoff = self.RECONNECT_BASE  # sucesso — reseta backoff
+                    now = time.time()
+                    do_full = (now - last_full_sync) >= self.OTHER_FOLDERS_INT
+                    self._run_idle_session(account_id, stop, do_full_sync=do_full)
+                    if do_full:
+                        last_full_sync = time.time()
+                backoff = self.RECONNECT_BASE
+
+                # Pausa entre sessões — libera a conexão para outros clientes (ex: Thunderbird)
+                if not stop.is_set():
+                    log.debug(f'IDLE {account_id}: pausa de {self.IDLE_PAUSE}s')
+                    stop.wait(self.IDLE_PAUSE)
+
             except Exception as e:
                 log.warning(f'IDLE account_id={account_id} erro: {e}')
                 _pool.invalidate(account_id)
@@ -305,13 +324,15 @@ class IMAPIdleManager:
                 stop.wait(backoff)
                 backoff = min(backoff * 2, self.RECONNECT_MAX)
 
-    def _run_idle_session(self, account_id: int, stop: threading.Event):
+    def _run_idle_session(self, account_id: int, stop: threading.Event,
+                          do_full_sync: bool = False):
         """
-        Sessão IDLE completa:
-        1. Sync inicial ao conectar (busca UIDs novos desde o último sync)
-        2. Entra em IDLE
-        3. Processa notificações do servidor
-        4. Renova IDLE a cada 25 min
+        Sessão IDLE única (tempo limitado):
+        1. Conecta ao servidor
+        2. Sync da INBOX (novos UIDs + flags)
+        3. Se do_full_sync: sync de todas as outras pastas também
+        4. Entra em IDLE por IDLE_TIMEOUT segundos
+        5. Desconecta — conexão liberada para outros clientes
         """
         from database import db as _db, Account as _Account
 
@@ -338,8 +359,28 @@ class IMAPIdleManager:
             # Extrai total de mensagens atual
             exists_count = int(data[0])
 
-            # Sync inicial — busca UIDs novos que ainda não estão no banco
+            # Sync da INBOX — busca UIDs novos e atualiza flags
             self._initial_sync(account, conn, _db)
+
+            # Sync de outras pastas se for hora (não bloqueia IDLE)
+            if do_full_sync:
+                log.info(f'IDLE {account.email}: sync completo de outras pastas')
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+                # Sync das outras pastas usando o pool normal (sem IDLE)
+                self._ms.sync_account_non_inbox(account_id)
+                # Reconecta para IDLE
+                if account.imap_ssl:
+                    conn = imaplib.IMAP4_SSL(account.imap_host, account.imap_port)
+                else:
+                    conn = imaplib.IMAP4(account.imap_host, account.imap_port)
+                conn.login(account.username, account.get_password())
+                status, data = conn.select('INBOX', readonly=False)
+                if status != 'OK':
+                    raise RuntimeError(f'SELECT INBOX falhou após full sync: {data}')
+                exists_count = int(data[0])
 
             # Emite que está online
             self._ms._emit('idle_status', {
@@ -712,6 +753,22 @@ class MailService:
         return result[:10]
 
     # ── Sync manual (para pastas não-INBOX e sync forçado) ────────────────────
+
+    def sync_account_non_inbox(self, account_id: int):
+        """Sync silencioso de todas as pastas EXCETO INBOX (já coberta pelo IDLE)."""
+        from database import db as _db, Account as _Account
+        account = _Account.query.get(account_id)
+        if not account:
+            return
+        try:
+            folders = self._get_sync_folders(account)
+            # Remove INBOX — já coberta pelo IDLE
+            folders = [f for f in folders if not f.upper().startswith('INBOX') or '.' in f]
+            log.info(f'Sync outras pastas {account.email}: {folders}')
+            for folder in folders:
+                self._sync_folder(account, folder)
+        except Exception as e:
+            log.warning(f'sync_account_non_inbox error {account.email}: {e}')
 
     def sync_account(self, account_id: int):
         """
