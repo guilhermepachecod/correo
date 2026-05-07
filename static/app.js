@@ -231,6 +231,18 @@ const log = {
 };
 
 // ── Init ───────────────────────────────────────────────────────────────────────
+function _initScrollInfinite() {
+  const list = document.getElementById('email-list');
+  if (!list) return;
+  list.addEventListener('scroll', () => {
+    if (!state.hasMore || state.isLoadingMore) return;
+    if (list.scrollHeight - list.scrollTop - list.clientHeight < 120) {
+      state.currentPage++;
+      loadEmails(true);
+    }
+  });
+}
+
 async function init() {
   loadSettings();
   _initScrollInfinite();
