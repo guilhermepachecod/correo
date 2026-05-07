@@ -389,7 +389,9 @@ class IMAPIdleManager:
 
             # Sync da INBOX — busca UIDs novos e atualiza flags
             log.info(f'IDLE {account.email}: iniciando sync da INBOX')
+            conn.socket().settimeout(60)  # timeout de 60s para operações de sync
             self._initial_sync(account, conn, _db)
+            conn.socket().settimeout(None)  # remove timeout antes do IDLE
             log.info(f'IDLE {account.email}: sync da INBOX concluído')
 
             # Sync de outras pastas se for hora (não bloqueia IDLE)
