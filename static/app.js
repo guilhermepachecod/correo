@@ -436,7 +436,7 @@ function realFoldersFor(folderKey, accountId) {
   const counts = folderCountsData[accountId] || {};
   const def    = FOLDER_DEFS.find(d => d.key === folderKey);
   if (!def) return [folderKey];
-  const matching = Object.keys(counts).filter(f => def.keywords.some(kw => f.toLowerCase().includes(kw)));
+  const matching = Object.keys(counts).filter(f => matchFolderDef(f)?.key === folderKey);
   return matching.length ? matching : (folderKey === 'inbox' ? ['INBOX'] : [folderKey]);
 }
 
