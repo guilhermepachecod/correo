@@ -526,11 +526,22 @@ async function loadEmails() {
   const empty   = document.getElementById('list-empty');
   loading.style.display = 'flex'; empty.style.display = 'none';
 
-  // Sempre filtra pela conta selecionada
   const accountId = state.selectedAccountId;
-  const folders   = accountId
-    ? realFoldersFor(state.selectedFolder, accountId)
-    : [state.selectedFolder === 'inbox' ? 'INBOX' : state.selectedFolder];
+
+  // Se tem selectedFolderReals definido (usuário clicou numa pasta), usa ele.
+  // Senão, usa só a pasta real correspondente — nunca todas as pastas.
+  let folders;
+  if (state.selectedFolderReals && state.selectedFolderReals.length) {
+    folders = state.selectedFolderReals;
+  } else if (accountId) {
+    // Fallback: só a pasta real, sem varrer todas
+    const def = FOLDER_DEFS.find(d => d.key === state.selectedFolder);
+    const counts = folderCountsData[accountId] || {};
+    const matching = Object.keys(counts).filter(f => matchFolderDef(f)?.key === state.selectedFolder);
+    folders = matching.length ? matching : [state.selectedFolder === 'inbox' ? 'INBOX' : state.selectedFolder];
+  } else {
+    folders = ['INBOX'];
+  }
 
   try {
     let all = [];
