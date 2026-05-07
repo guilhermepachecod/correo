@@ -252,6 +252,7 @@ class IMAPIdleManager:
         self._threads   = {}             # account_id -> Thread
         self._stop_flags = {}            # account_id -> threading.Event
         self._lock      = threading.Lock()
+        self._auth_failed = set()        # account_ids com erro de autenticação
 
     def start_account(self, account_id: int):
         """Inicia IDLE para uma conta. Idempotente."""
@@ -285,9 +286,14 @@ class IMAPIdleManager:
             _pool.close_all()
 
     def restart_account(self, account_id: int):
+        """Reinicia o IDLE. Limpa erro de autenticação para permitir retry."""
+        self._auth_failed.discard(account_id)
         self.stop_account(account_id)
         time.sleep(1)
         self.start_account(account_id)
+
+    def has_auth_error(self, account_id: int) -> bool:
+        return account_id in self._auth_failed
 
     def _idle_loop(self, account_id: int, stop: threading.Event):
         """
@@ -296,11 +302,18 @@ class IMAPIdleManager:
         2. Entra em IDLE por IDLE_TIMEOUT segundos
         3. Desconecta e espera IDLE_PAUSE segundos (libera conexão para outros clientes)
         4. Repete — a cada OTHER_FOLDERS_INT também sincroniza outras pastas
+        Erros de autenticação param o loop — só reinicia via retry manual.
         """
         backoff = self.RECONNECT_BASE
-        last_full_sync = 0  # timestamp do último sync completo de outras pastas
+        last_full_sync = 0
 
         while not stop.is_set():
+            # Para imediatamente se houve erro de autenticação
+            if account_id in self._auth_failed:
+                log.info(f'IDLE {account_id}: parado por erro de autenticação — aguardando retry manual')
+                stop.wait()  # bloqueia até stop.set() (retry manual chama restart_account)
+                break
+
             try:
                 with self._app.app_context():
                     now = time.time()
@@ -310,14 +323,29 @@ class IMAPIdleManager:
                         last_full_sync = time.time()
                 backoff = self.RECONNECT_BASE
 
-                # Pausa entre sessões — libera a conexão para outros clientes (ex: Thunderbird)
                 if not stop.is_set():
                     log.debug(f'IDLE {account_id}: pausa de {self.IDLE_PAUSE}s')
                     stop.wait(self.IDLE_PAUSE)
 
             except Exception as e:
-                log.warning(f'IDLE account_id={account_id} erro: {e}')
+                err = str(e)
                 _pool.invalidate(account_id)
+
+                # Erro de autenticação — para de tentar, emite erro permanente
+                if any(kw in err.lower() for kw in
+                       ['authentication failed', 'authenticationfailed',
+                        'invalid credentials', 'login failed', '[auth]',
+                        'authentication error']):
+                    log.error(f'IDLE {account_id}: erro de autenticação permanente — parando')
+                    self._auth_failed.add(account_id)
+                    self._ms._emit('sync_error', {
+                        'account_id': account_id,
+                        'error': f'Erro de autenticação: verifique usuário/senha ({err})',
+                        'auth_failed': True,
+                    })
+                    stop.wait()  # aguarda retry manual
+                    break
+
                 if stop.is_set():
                     break
                 log.info(f'IDLE account_id={account_id} reconectando em {backoff}s')
@@ -471,9 +499,8 @@ class IMAPIdleManager:
     def _initial_sync(self, account: Account, conn, _db):
         """
         Sync inicial ao conectar:
-        - Busca UIDs existentes no servidor
-        - Compara com banco
-        - Faz fetch só dos novos (máx 100 para não demorar)
+        - Se banco vazio: baixa TODOS os e-mails em batches de 100
+        - Se banco tem dados: baixa só os novos (máx 200 mais recentes)
         - Atualiza flags dos existentes
         """
         try:
@@ -489,13 +516,26 @@ class IMAPIdleManager:
                     .filter_by(account_id=account.id, folder='INBOX').all()
             )
 
-            new_uids = sorted(set(server_uids) - existing)[-100:]
+            new_uids = sorted(set(server_uids) - existing)
 
             if new_uids:
-                log.info(f'IDLE sync inicial {account.email}: {len(new_uids)} novos')
-                uid_str = ','.join(str(u) for u in new_uids)
-                _, msg_data = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
-                self._process_fetch_data(account, msg_data, 'INBOX', _db)
+                is_first_sync = len(existing) == 0
+                if is_first_sync:
+                    # Primeira vez: baixa tudo em batches para não travar
+                    log.info(f'IDLE sync inicial {account.email}: {len(new_uids)} e-mails (primeira vez, batches de 100)')
+                    for i in range(0, len(new_uids), 100):
+                        batch = new_uids[i:i+100]
+                        uid_str = ','.join(str(u) for u in batch)
+                        _, msg_data = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
+                        self._process_fetch_data(account, msg_data, 'INBOX', _db)
+                        log.info(f'IDLE sync {account.email}: {min(i+100, len(new_uids))}/{len(new_uids)} baixados')
+                else:
+                    # Já tem dados: pega só os 200 mais recentes não baixados
+                    recent_new = new_uids[-200:]
+                    log.info(f'IDLE sync inicial {account.email}: {len(recent_new)} novos')
+                    uid_str = ','.join(str(u) for u in recent_new)
+                    _, msg_data = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
+                    self._process_fetch_data(account, msg_data, 'INBOX', _db)
 
             # Sync de flags dos 200 mais recentes
             recent_uids = sorted(set(server_uids) & existing)[-200:]
