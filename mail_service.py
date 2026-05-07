@@ -388,7 +388,9 @@ class IMAPIdleManager:
             exists_count = int(data[0])
 
             # Sync da INBOX — busca UIDs novos e atualiza flags
+            log.info(f'IDLE {account.email}: iniciando sync da INBOX')
             self._initial_sync(account, conn, _db)
+            log.info(f'IDLE {account.email}: sync da INBOX concluído')
 
             # Sync de outras pastas se for hora (não bloqueia IDLE)
             if do_full_sync:
@@ -397,9 +399,12 @@ class IMAPIdleManager:
                     conn.logout()
                 except Exception:
                     pass
-                # Sync das outras pastas usando o pool normal (sem IDLE)
-                self._ms.sync_account_non_inbox(account_id)
-                # Reconecta para IDLE
+                try:
+                    # Sync das outras pastas usando o pool normal (sem IDLE)
+                    self._ms.sync_account_non_inbox(account_id)
+                except Exception as e:
+                    log.warning(f'IDLE {account.email}: erro no sync de outras pastas: {e}')
+                # Reconecta para IDLE independente de erro no full_sync
                 if account.imap_ssl:
                     conn = imaplib.IMAP4_SSL(account.imap_host, account.imap_port)
                 else:
@@ -545,7 +550,7 @@ class IMAPIdleManager:
                 self._sync_flags(account, flag_data, _db)
 
         except Exception as e:
-            log.warning(f'IDLE sync inicial error {account.email}: {e}')
+            log.error(f'IDLE sync inicial error {account.email}: {e}', exc_info=True)
 
     def _fetch_new(self, account: Account, conn, _db,
                    seq_from: int, seq_to: int) -> int:
