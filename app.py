@@ -18,6 +18,12 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'mailapp-secret-2024'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////app/database/mail.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# SQLite com NullPool — sem pool, cada thread abre e fecha sua própria conexão
+# Necessário porque as threads do IDLE rodam fora do contexto Flask
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'connect_args': {'check_same_thread': False},
+    'poolclass': __import__('sqlalchemy.pool', fromlist=['NullPool']).NullPool,
+}
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 
 ACCOUNTS_DIR = Path('/app/accounts')
