@@ -20,6 +20,7 @@ const state = {
   // sync state por conta
   syncErrors: {},       // accountId -> errorMessage
   syncingIds: new Set(),// accountIds atualmente sincronizando
+  authFailed: new Set(), // contas com erro de autenticação permanente
   lastSyncTime: {},     // accountId -> timestamp (ms)
 };
 
