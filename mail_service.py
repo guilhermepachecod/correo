@@ -476,6 +476,17 @@ class IMAPIdleManager:
                             new_exists = count
                             # Sai do IDLE para buscar os novos
                             break
+                        elif kind == 'EXPUNGE':
+                            # Servidor removeu uma mensagem — sincroniza exclusões em background
+                            log.info(f'IDLE {account.email}: EXPUNGE seq={count}, sincronizando exclusões')
+                            new_exists = max(0, new_exists - 1)
+                            # Dispara sync de flags/exclusões em thread separada
+                            import threading as _threading
+                            _threading.Thread(
+                                target=self._sync_deletions,
+                                args=(account, _db),
+                                daemon=True,
+                            ).start()
 
                 # Sai do IDLE: envia DONE
                 try:
@@ -651,6 +662,43 @@ class IMAPIdleManager:
 
         enforce_email_limit(account.id)
         return saved
+
+    def _sync_deletions(self, account: Account, _db):
+        """Remove do banco os e-mails que foram deletados no servidor."""
+        try:
+            with self._app.app_context():
+                if account.imap_ssl:
+                    conn = imaplib.IMAP4_SSL(account.imap_host, account.imap_port)
+                else:
+                    conn = imaplib.IMAP4(account.imap_host, account.imap_port)
+                conn.login(account.username, account.get_password())
+                conn.select('INBOX', readonly=True)
+                _, data = conn.uid('search', None, 'ALL')
+                server_uids = set(int(u) for u in (data[0].split() if data[0] else []))
+                conn.logout()
+
+                db_uids = {
+                    row[0]: row[1]
+                    for row in _db.session.query(Email.uid, Email.id)
+                        .filter_by(account_id=account.id, folder='INBOX').all()
+                }
+                deleted_uids = set(db_uids.keys()) - server_uids
+                if not deleted_uids:
+                    return
+
+                log.info(f'IDLE {account.email}: removendo {len(deleted_uids)} e-mail(s) deletados no servidor')
+                deleted_ids = [db_uids[uid] for uid in deleted_uids]
+                _db.session.query(Email).filter(Email.id.in_(deleted_ids)).delete(synchronize_session=False)
+                _db.session.commit()
+
+                # Notifica frontend para recarregar
+                self._ms._emit('sync_done', {
+                    'account_id': account.id,
+                    'email': account.email,
+                    'new': 0,
+                })
+        except Exception as e:
+            log.warning(f'_sync_deletions error {account.email}: {e}')
 
     def _sync_flags(self, account: Account, flag_data, _db):
         """Atualiza flags (lido/não-lido) dos e-mails existentes."""
@@ -892,6 +940,8 @@ class MailService:
             existing_uids = set(existing_uid_map.keys())
 
             new_uids_int = sorted(list(all_uids_server - existing_uids))[-200:]
+
+            log.info(f'_sync_folder {account.email} {folder}: server={len(all_uids_server)} db={len(existing_uids)} new={len(new_uids_int)}')
 
             if new_uids_int:
                 uid_str = ','.join(str(u) for u in new_uids_int)
