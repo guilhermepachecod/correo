@@ -526,15 +526,24 @@ async function triggerSync(accountId, force = true) {
 async function syncAll() {
   const btn = document.getElementById('sync-all-btn');
   btn.classList.add('spinning');
-  await fetch('/api/sync/all', { method: 'POST' });
-  setTimeout(() => btn.classList.remove('spinning'), 2000);
+  // Reinicia IDLE de todas as contas
+  for (const acc of state.accounts) {
+    await fetch(`/api/accounts/${acc.id}/idle-restart`, { method: 'POST' });
+  }
+  setTimeout(() => { loadEmails(); refreshFolderCounts(); btn.classList.remove('spinning'); }, 4000);
 }
 
 async function syncCurrent() {
   const btn = document.getElementById('sync-btn');
   btn.classList.add('spinning');
-  await (state.selectedAccountId ? triggerSync(state.selectedAccountId) : fetch('/api/sync/all', { method: 'POST' }));
-  setTimeout(() => btn.classList.remove('spinning'), 2000);
+  if (state.selectedAccountId) {
+    // Reinicia o IDLE para reconectar imediatamente e buscar novos e-mails
+    await fetch(`/api/accounts/${state.selectedAccountId}/idle-restart`, { method: 'POST' });
+    // Aguarda um pouco e recarrega
+    setTimeout(() => { loadEmails(); refreshFolderCounts(); btn.classList.remove('spinning'); }, 3000);
+  } else {
+    setTimeout(() => btn.classList.remove('spinning'), 2000);
+  }
 }
 
 async function manualSyncAccount(accountId) {
@@ -822,29 +831,56 @@ async function bulkAction(action) {
   const ids = [...state.selectedIds]; if (!ids.length) return;
   const L = { delete: 'Excluir', mark_spam: 'Marcar como spam', mark_read: 'Marcar como lido', mark_unread: 'Marcar como não lido', mark_not_spam: 'Desmarcar spam' };
   if (['delete', 'mark_spam'].includes(action) && !confirm(`${L[action]} ${ids.length} e-mail(s)?`)) return;
-  const data = await (await fetch('/api/emails/bulk', {
+
+  // Atualiza UI imediatamente
+  const idSet = new Set(ids);
+  if (['delete', 'mark_spam'].includes(action)) {
+    state.emails = state.emails.filter(e => !idSet.has(e.id));
+    if (idSet.has(state.selectedEmailId)) { hideEmail(); state.selectedEmailId = null; }
+  } else if (action === 'mark_read') {
+    state.emails.filter(e => idSet.has(e.id)).forEach(e => { e.is_read = true; _patchEmailItem(e.id, { is_read: true }); });
+  } else if (action === 'mark_unread') {
+    state.emails.filter(e => idSet.has(e.id)).forEach(e => { e.is_read = false; _patchEmailItem(e.id, { is_read: false }); });
+  }
+  state.selectedIds.clear();
+  renderEmailList();
+  refreshFolderCounts();
+  toast(`${L[action]}: ${ids.length} e-mail(s)`, 'success');
+
+  // Sincroniza em background
+  fetch('/api/emails/bulk', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
-  })).json();
-  if (data.ok) {
-    toast(`${L[action]}: ${data.count} e-mail(s)`, 'success');
-    state.selectedIds.clear(); await loadEmails(); await refreshFolderCounts();
-    if (['delete', 'mark_spam'].includes(action) && ids.includes(state.selectedEmailId)) { hideEmail(); state.selectedEmailId = null; }
-  } else toast('Erro na operação', 'error');
+  }).catch(() => {});
 }
 
 async function bulkActionAll(action) {
+  if (!state.selectedAccountId) { toast('Selecione uma conta primeiro', 'error'); return; }
   const L = { mark_read: 'Marcar todos como lido', delete: 'Excluir todos' };
   if (!confirm(`${L[action]} na pasta atual?`)) return;
-  const folders = state.selectedFolderReals || ['INBOX'];
+  const folders = state.selectedFolderReals && state.selectedFolderReals.length
+    ? state.selectedFolderReals : ['INBOX'];
+
+  // Atualiza UI imediatamente
+  const count = state.emails.length;
+  if (action === 'delete') {
+    state.emails = [];
+    hideEmail(); state.selectedEmailId = null;
+    renderEmailList();
+  } else if (action === 'mark_read') {
+    state.emails.forEach(e => { e.is_read = true; _patchEmailItem(e.id, { is_read: true }); });
+  }
+  state.selectedIds.clear();
+  refreshFolderCounts();
+  toast(`${L[action]}: ${count} e-mail(s)`, 'success');
+
+  // Sincroniza em background
   for (const folder of folders) {
-    await fetch('/api/emails/bulk', {
+    fetch('/api/emails/bulk', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, ids: [], folder, account_id: state.selectedAccountId }),
-    });
+    }).catch(() => {});
   }
-  toast('Operação concluída', 'success'); await loadEmails(); await refreshFolderCounts();
-  if (action === 'delete') { hideEmail(); state.selectedEmailId = null; }
 }
 
 // ── Thread view ────────────────────────────────────────────────────────────────
@@ -969,6 +1005,10 @@ async function openEmail(id) {
   _updateViewButtons();
 }
 
+function isSpamFolder(name) {
+  return /spam|junk/i.test(name || '');
+}
+
 function _renderEmailBody() {
   const email    = state.currentEmail; if (!email) return;
   const bodyHtml = document.getElementById('ev-body-html');
@@ -1023,35 +1063,43 @@ async function toggleStar() {
 
 async function markUnread() {
   const id = state.selectedEmailId; if (!id) return;
-  await fetch(`/api/emails/${id}/read`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ read: false }) });
+  // Atualiza UI imediatamente
   const le = state.emails.find(e => e.id === id);
   if (le) { le.is_read = false; _patchEmailItem(id, { is_read: false }); }
   hideEmail(); state.selectedEmailId = null;
   toast('Marcado como não lido', 'success');
+  refreshFolderCounts();
+  // Sincroniza em background
+  fetch(`/api/emails/${id}/read`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ read: false }) }).catch(() => {});
 }
 
 async function toggleSpam() {
   const id = state.selectedEmailId; if (!id) return;
   const btn    = document.getElementById('ev-spam-btn');
   const isSpam = btn.dataset.isSpam === '1';
-  const data   = await (await fetch(`/api/emails/${id}/spam`, {
+  // Atualiza UI imediatamente
+  state.emails = state.emails.filter(e => e.id !== id);
+  state.selectedEmailId = null;
+  hideEmail(); renderEmailList(); refreshFolderCounts();
+  toast(isSpam ? 'Removido do spam' : 'Marcado como spam', 'success');
+  // Sincroniza com servidor em background
+  fetch(`/api/emails/${id}/spam`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ spam: !isSpam }),
-  })).json();
-  if (data.ok) {
-    toast(isSpam ? 'Removido do spam' : 'Marcado como spam', 'success');
-    state.emails = state.emails.filter(e => e.id !== id);
-    state.selectedEmailId = null; hideEmail(); renderEmailList(); refreshFolderCounts();
-  } else toast('Erro ao mover e-mail', 'error');
+  }).catch(() => {});
 }
 
 async function deleteEmail() {
   if (!state.selectedEmailId) return;
   if (!confirm('Excluir este e-mail?')) return;
-  await fetch(`/api/emails/${state.selectedEmailId}`, { method: 'DELETE' });
-  state.emails = state.emails.filter(e => e.id !== state.selectedEmailId);
-  state.selectedEmailId = null; hideEmail(); renderEmailList(); refreshFolderCounts();
+  const id = state.selectedEmailId;
+  // Atualiza UI imediatamente
+  state.emails = state.emails.filter(e => e.id !== id);
+  state.selectedEmailId = null;
+  hideEmail(); renderEmailList(); refreshFolderCounts();
   toast('E-mail excluído', 'success');
+  // Sincroniza com servidor em background
+  fetch(`/api/emails/${id}`, { method: 'DELETE' }).catch(() => {});
 }
 
 // ── Compose ────────────────────────────────────────────────────────────────────
