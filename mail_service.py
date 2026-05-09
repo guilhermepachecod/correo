@@ -477,16 +477,11 @@ class IMAPIdleManager:
                             # Sai do IDLE para buscar os novos
                             break
                         elif kind == 'EXPUNGE':
-                            # Servidor removeu uma mensagem — sincroniza exclusões em background
-                            log.info(f'IDLE {account.email}: EXPUNGE seq={count}, sincronizando exclusões')
+                            # Servidor removeu uma mensagem
+                            log.info(f'IDLE {account.email}: EXPUNGE seq={count}')
                             new_exists = max(0, new_exists - 1)
-                            # Dispara sync de flags/exclusões em thread separada
-                            import threading as _threading
-                            _threading.Thread(
-                                target=self._sync_deletions,
-                                args=(account, _db),
-                                daemon=True,
-                            ).start()
+                            # Sai do IDLE para reconectar e checar exclusões
+                            break
 
                 # Sai do IDLE: envia DONE
                 try:
@@ -507,6 +502,11 @@ class IMAPIdleManager:
                     exists_count = new_exists
                     if fetched:
                         log.info(f'IDLE {account.email}: {fetched} e-mail(s) salvo(s)')
+                elif new_exists < exists_count and not stop.is_set():
+                    # Houve exclusão — sincroniza usando a conexão atual
+                    log.info(f'IDLE {account.email}: {exists_count - new_exists} e-mail(s) removido(s), sincronizando')
+                    self._sync_deletions_with_conn(account, conn, _db)
+                    exists_count = new_exists
                 else:
                     exists_count = new_exists
 
@@ -662,6 +662,27 @@ class IMAPIdleManager:
 
         enforce_email_limit(account.id)
         return saved
+
+    def _sync_deletions_with_conn(self, account: Account, conn, _db):
+        """Remove do banco os e-mails deletados, usando conexão IDLE existente."""
+        try:
+            _, data = conn.uid('search', None, 'ALL')
+            server_uids = set(int(u) for u in (data[0].split() if data[0] else []))
+            db_uids = {
+                row[0]: row[1]
+                for row in _db.session.query(Email.uid, Email.id)
+                    .filter_by(account_id=account.id, folder='INBOX').all()
+            }
+            deleted_uids = set(db_uids.keys()) - server_uids
+            if not deleted_uids:
+                return
+            log.info(f'IDLE {account.email}: removendo {len(deleted_uids)} e-mail(s) deletados')
+            deleted_ids = [db_uids[uid] for uid in deleted_uids]
+            _db.session.query(Email).filter(Email.id.in_(deleted_ids)).delete(synchronize_session=False)
+            _db.session.commit()
+            self._ms._emit('sync_done', {'account_id': account.id, 'email': account.email, 'new': 0})
+        except Exception as e:
+            log.warning(f'_sync_deletions_with_conn error {account.email}: {e}')
 
     def _sync_deletions(self, account: Account, _db):
         """Remove do banco os e-mails que foram deletados no servidor."""
@@ -941,7 +962,16 @@ class MailService:
 
             new_uids_int = sorted(list(all_uids_server - existing_uids))[-200:]
 
-            log.info(f'_sync_folder {account.email} {folder}: server={len(all_uids_server)} db={len(existing_uids)} new={len(new_uids_int)}')
+            # Remove fantasmas — UIDs no banco que não existem mais no servidor
+            ghost_uids = existing_uids - all_uids_server
+            if ghost_uids:
+                log.info(f'_sync_folder {account.email} {folder}: removendo {len(ghost_uids)} fantasmas')
+                ghost_ids = [existing_uid_map[uid]['id'] for uid in ghost_uids if uid in existing_uid_map]
+                if ghost_ids:
+                    _db.session.query(Email).filter(Email.id.in_(ghost_ids)).delete(synchronize_session=False)
+                    _db.session.commit()
+
+            log.info(f'_sync_folder {account.email} {folder}: server={len(all_uids_server)} db={len(existing_uids)} new={len(new_uids_int)} ghosts={len(ghost_uids)}')
 
             if new_uids_int:
                 uid_str = ','.join(str(u) for u in new_uids_int)
