@@ -90,15 +90,9 @@
       <div id="email-list-header">
         <div class="elh-col" style="cursor:default"></div>
         <div class="elh-col" style="cursor:default">⚑ 📎</div>
-        <div class="elh-col" id="sort-from" onclick="setSortBy('from')">
-          Remetente <span class="sort-arrow" id="sort-from-arrow"></span>
-        </div>
-        <div class="elh-col" id="sort-subject" onclick="setSortBy('subject')">
-          Assunto <span class="sort-arrow" id="sort-subject-arrow"></span>
-        </div>
-        <div class="elh-col" id="sort-date" onclick="setSortBy('date')" style="justify-content:flex-end">
-          Data <span class="sort-arrow" id="sort-date-arrow">▼</span>
-        </div>
+        <div class="elh-col" id="sort-from" onclick="setSortBy('from')">Remetente <span class="sort-arrow" id="sort-from-arrow"></span></div>
+        <div class="elh-col" id="sort-subject" onclick="setSortBy('subject')">Assunto <span class="sort-arrow" id="sort-subject-arrow"></span></div>
+        <div class="elh-col" id="sort-date" onclick="setSortBy('date')" style="justify-content:flex-end">Data <span class="sort-arrow" id="sort-date-arrow">▼</span></div>
       </div>
 
       <div id="email-list">
@@ -189,13 +183,9 @@
       <div class="compose-field"><span class="compose-label">Cc</span><input class="compose-input" id="compose-cc" type="text"></div>
       <div class="compose-field"><span class="compose-label">Assunto</span><input class="compose-input" id="compose-subject" type="text" placeholder="Assunto"></div>
     </div>
-
-    <!-- Modo texto -->
     <div id="compose-body-wrap">
       <textarea id="compose-body" placeholder="Escreva sua mensagem..."></textarea>
     </div>
-
-    <!-- Modo HTML — editor rico -->
     <div id="compose-html-wrap" style="display:none;flex:1;display:none;flex-direction:column;min-height:0;">
       <div id="compose-toolbar">
         <button class="ced-btn" onclick="execCmd('bold')" title="Negrito"><b>B</b></button>
@@ -223,7 +213,6 @@
       </div>
       <div id="compose-editor" contenteditable="true" spellcheck="true"></div>
     </div>
-
     <div id="compose-footer">
       <button id="compose-send-btn" onclick="sendEmail()">Enviar</button>
       <button class="compose-attach-btn" onclick="document.getElementById('compose-file-input').click()">📎 Anexar</button>
@@ -246,10 +235,7 @@
       </div>
       <hr class="form-divider">
       <h2 id="account-form-title" style="margin-bottom:14px;font-size:13px;">Adicionar conta</h2>
-      <div class="form-group">
-        <label class="form-label">Nome de exibição <span style="color:var(--muted);font-size:10px;">(nome do .conf)</span></label>
-        <input class="form-input" id="af-name" type="text" placeholder="pessoal">
-      </div>
+      <div class="form-group"><label class="form-label">Nome de exibição</label><input class="form-input" id="af-name" type="text" placeholder="pessoal"></div>
       <div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="af-email" type="email" placeholder="voce@email.com"></div>
       <div class="form-group"><label class="form-label">Usuário (login)</label><input class="form-input" id="af-username" type="text" placeholder="geralmente o próprio e-mail"></div>
       <div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="af-password" type="password" placeholder="senha ou app password"></div>
@@ -286,62 +272,30 @@
       <button class="compose-close" onclick="closeFiltersModal()">×</button>
     </div>
     <div id="filters-box-body">
-
-      <!-- Seletor de conta -->
       <div class="form-group" style="display:flex;align-items:center;gap:10px;">
         <label class="form-label" style="margin:0;white-space:nowrap;">Conta</label>
         <select id="filter-account-select" class="form-input" style="flex:1" onchange="loadFilters()"></select>
         <button class="btn btn-primary" style="padding:5px 12px;font-size:11px;white-space:nowrap" onclick="openFilterForm()">+ Novo filtro</button>
       </div>
-
-      <!-- Lista de filtros existentes -->
       <div id="filter-list"></div>
-
       <hr class="form-divider" id="filter-form-divider" style="display:none">
-
-      <!-- Formulário de criação/edição -->
       <div id="filter-form" style="display:none">
         <div style="font-size:12px;font-weight:600;margin-bottom:10px;" id="filter-form-title">Novo filtro</div>
-
-        <div class="form-group">
-          <label class="form-label">Nome do filtro</label>
-          <input class="form-input" id="ff-name" type="text" placeholder="Ex: Newsletters">
-        </div>
-
-        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;">CONDIÇÕES (todas devem ser satisfeitas)</div>
+        <div class="form-group"><label class="form-label">Nome do filtro</label><input class="form-input" id="ff-name" type="text" placeholder="Ex: Newsletters"></div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;">CONDIÇÕES</div>
         <div class="form-row form-group" style="grid-template-columns:1fr 1fr;">
-          <div>
-            <label class="form-label">De contém</label>
-            <input class="form-input" id="ff-cond-from" type="text" placeholder="newsletter@">
-          </div>
-          <div>
-            <label class="form-label">Para contém</label>
-            <input class="form-input" id="ff-cond-to" type="text" placeholder="meu@email.com">
-          </div>
+          <div><label class="form-label">De contém</label><input class="form-input" id="ff-cond-from" type="text" placeholder="newsletter@"></div>
+          <div><label class="form-label">Para contém</label><input class="form-input" id="ff-cond-to" type="text" placeholder="meu@email.com"></div>
         </div>
-        <div class="form-group">
-          <label class="form-label">Assunto contém</label>
-          <input class="form-input" id="ff-cond-subject" type="text" placeholder="Promoção">
-        </div>
-        <div class="form-group" style="display:flex;gap:16px;">
-          <label class="form-check">
-            <input type="checkbox" id="ff-cond-attach"> Tem anexo
-          </label>
-        </div>
-
+        <div class="form-group"><label class="form-label">Assunto contém</label><input class="form-input" id="ff-cond-subject" type="text" placeholder="Promoção"></div>
+        <div class="form-group"><label class="form-check"><input type="checkbox" id="ff-cond-attach"> Tem anexo</label></div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;margin-top:8px;">AÇÕES</div>
-        <div class="form-group">
-          <label class="form-label">Mover para pasta</label>
-          <select id="ff-action-folder" class="form-input">
-            <option value="">— não mover —</option>
-          </select>
-        </div>
+        <div class="form-group"><label class="form-label">Mover para pasta</label><select id="ff-action-folder" class="form-input"><option value="">— não mover —</option></select></div>
         <div style="display:flex;gap:16px;flex-wrap:wrap;" class="form-group">
           <label class="form-check"><input type="checkbox" id="ff-action-read"> Marcar como lido</label>
           <label class="form-check"><input type="checkbox" id="ff-action-star"> Estrelar</label>
           <label class="form-check"><input type="checkbox" id="ff-action-delete"> Excluir</label>
         </div>
-
         <div style="display:flex;align-items:center;gap:8px;" class="form-group">
           <label class="form-check"><input type="checkbox" id="ff-enabled" checked> Ativo</label>
           <label class="form-label" style="margin:0">Prioridade</label>
@@ -358,6 +312,16 @@
 
 <div id="sync-notif" class="sync-notif"></div>
 <div id="toast"></div>
-<script src="/static/app.js"></script>
+
+<!-- JS em ordem de dependência -->
+<script src="/static/js/utils.js"></script>
+<script src="/static/js/state.js"></script>
+<script src="/static/js/accounts.js"></script>
+<script src="/static/js/emails.js"></script>
+<script src="/static/js/viewer.js"></script>
+<script src="/static/js/compose.js"></script>
+<script src="/static/js/filters.js"></script>
+<script src="/static/js/socket.js"></script>
+<script src="/static/js/app.js"></script>
 </body>
 </html>

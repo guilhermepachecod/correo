@@ -1,0 +1,229 @@
+"""
+routes/emails.py
+Operações sobre e-mails: listagem, leitura, flags, spam,
+exclusão, envio, ações em massa, mover e threads.
+"""
+import io
+import threading
+from flask import Blueprint, request, jsonify, send_file, abort, current_app
+
+from database import db, Account, Email, Attachment, enforce_email_limit
+
+bp = Blueprint('emails', __name__)
+
+def _ms():
+    from extensions import mail_service
+    return mail_service
+
+
+# ── Listagem ──────────────────────────────────────────────────────────────────
+
+@bp.get('/api/emails')
+def get_emails():
+    account_id = request.args.get('account_id', type=int)
+    folder     = request.args.get('folder', 'INBOX')
+    page       = request.args.get('page', 1, type=int)
+    per_page   = request.args.get('per_page', 50, type=int)
+    search     = request.args.get('search', '').strip()
+    thread_id  = request.args.get('thread_id', '').strip()
+
+    q = Email.query
+    if account_id: q = q.filter_by(account_id=account_id)
+    if folder:     q = q.filter_by(folder=folder)
+    if thread_id:  q = q.filter_by(thread_id=thread_id)
+    if search:
+        like = f'%{search}%'
+        q = q.filter(db.or_(
+            Email.subject.ilike(like),
+            Email.from_addr.ilike(like),
+            Email.body_text.ilike(like),
+        ))
+    q = q.order_by(Email.date.desc())
+    pag = q.paginate(page=page, per_page=per_page, error_out=False)
+    return jsonify({
+        'emails': [e.to_list_dict() for e in pag.items],
+        'total':  pag.total,
+        'pages':  pag.pages,
+        'page':   page,
+    })
+
+
+@bp.get('/api/emails/<int:email_id>')
+def get_email(email_id):
+    email = Email.query.get_or_404(email_id)
+    if not email.is_read:
+        email.is_read = True
+        db.session.commit()
+        _ms().mark_read_on_server(email)
+    return jsonify(email.to_dict())
+
+
+# ── Flags ─────────────────────────────────────────────────────────────────────
+
+@bp.post('/api/emails/<int:email_id>/star')
+def toggle_star(email_id):
+    email = Email.query.get_or_404(email_id)
+    email.is_starred = not email.is_starred
+    db.session.commit()
+    return jsonify({'starred': email.is_starred})
+
+
+@bp.post('/api/emails/<int:email_id>/read')
+def set_read(email_id):
+    email   = Email.query.get_or_404(email_id)
+    is_read = request.json.get('read', True)
+    email.is_read = is_read
+    db.session.commit()
+    if is_read:
+        _ms().mark_read_on_server(email)
+    else:
+        _ms().mark_unread_on_server(email)
+    return jsonify({'read': email.is_read})
+
+
+@bp.post('/api/emails/<int:email_id>/spam')
+def set_spam(email_id):
+    email        = Email.query.get_or_404(email_id)
+    mark_as_spam = request.json.get('spam', True)
+    result       = _ms().set_spam(email, mark_as_spam)
+    if result:
+        db.session.refresh(email)
+    return jsonify({'ok': result, 'folder': email.folder})
+
+
+# ── Delete / Move ─────────────────────────────────────────────────────────────
+
+@bp.delete('/api/emails/<int:email_id>')
+def delete_email(email_id):
+    email = Email.query.get_or_404(email_id)
+    _ms().delete_email(email)
+    for att in email.attachments:
+        att.delete_from_disk()
+    db.session.delete(email)
+    db.session.commit()
+    return jsonify({'ok': True})
+
+
+@bp.post('/api/emails/<int:email_id>/move')
+def move_email(email_id):
+    email  = Email.query.get_or_404(email_id)
+    folder = request.json.get('folder')
+    if not folder:
+        return jsonify({'error': 'folder obrigatório'}), 400
+    _ms().move_email(email, folder)
+    return jsonify({'ok': True})
+
+
+# ── Send ──────────────────────────────────────────────────────────────────────
+
+@bp.post('/api/emails/send')
+def send_email():
+    account_id = request.form.get('account_id', type=int)
+    if not account_id:
+        return jsonify({'error': 'account_id obrigatório'}), 400
+    account = Account.query.get_or_404(account_id)
+    result  = _ms().send_email(
+        account=account,
+        to=request.form.get('to', ''),
+        cc=request.form.get('cc', ''),
+        bcc=request.form.get('bcc', ''),
+        subject=request.form.get('subject', ''),
+        body=request.form.get('body', ''),
+        body_html=request.form.get('body_html', ''),
+        reply_to_id=request.form.get('reply_to_id', type=int),
+        attachments=request.files.getlist('attachments'),
+    )
+    return jsonify(result)
+
+
+# ── Bulk ──────────────────────────────────────────────────────────────────────
+
+@bp.post('/api/emails/bulk')
+def bulk_action():
+    data       = request.json
+    action     = data.get('action')
+    ids        = data.get('ids', [])
+    folder     = data.get('folder', 'INBOX')
+    account_id = data.get('account_id')
+    ms         = _ms()
+
+    if ids:
+        emails = Email.query.filter(Email.id.in_(ids)).all()
+    else:
+        q = Email.query.filter_by(folder=folder)
+        if account_id:
+            q = q.filter_by(account_id=account_id)
+        emails = q.all()
+    count = 0
+    for email in emails:
+        try:
+            if action == 'mark_read' and not email.is_read:
+                email.is_read = True; ms.mark_read_on_server(email)
+            elif action == 'mark_unread' and email.is_read:
+                email.is_read = False; ms.mark_unread_on_server(email)
+            elif action == 'mark_spam':
+                ms.set_spam(email, True)
+            elif action == 'mark_not_spam':
+                ms.set_spam(email, False)
+            elif action == 'delete':
+                ms.delete_email(email)
+                for att in email.attachments: att.delete_from_disk()
+                db.session.delete(email)
+            count += 1
+        except Exception as e:
+            from flask import current_app
+            current_app.logger.warning(f'bulk {action} error email {email.id}: {e}')
+    db.session.commit()
+    return jsonify({'ok': True, 'count': count})
+
+
+# ── Threads ───────────────────────────────────────────────────────────────────
+
+@bp.get('/api/threads/<path:thread_id>')
+def get_thread(thread_id):
+    account_id = request.args.get('account_id', type=int)
+    q = Email.query.filter_by(thread_id=thread_id)
+    if account_id:
+        q = q.filter_by(account_id=account_id)
+    emails = q.order_by(Email.date.asc()).all()
+    return jsonify([e.to_dict() for e in emails])
+
+
+# ── Attachments ───────────────────────────────────────────────────────────────
+
+@bp.get('/api/attachments/<int:attachment_id>')
+def download_attachment(attachment_id):
+    att = Attachment.query.get_or_404(attachment_id)
+    try:
+        data = att.get_data()
+    except FileNotFoundError:
+        abort(404)
+    return send_file(io.BytesIO(data), download_name=att.filename,
+                     mimetype=att.content_type, as_attachment=True)
+
+
+# ── IMAP Search ───────────────────────────────────────────────────────────────
+
+@bp.post('/api/accounts/<int:account_id>/search-imap')
+def search_imap(account_id):
+    Account.query.get_or_404(account_id)
+    data   = request.json
+    query  = data.get('query', '').strip()
+    folder = data.get('folder', 'INBOX')
+    if not query:
+        return jsonify({'error': 'query obrigatório'}), 400
+    app = current_app._get_current_object()
+    def run():
+        with app.app_context():
+            _ms().search_imap(account_id, folder, query)
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({'ok': True})
+
+
+# ── Manutenção ────────────────────────────────────────────────────────────────
+
+@bp.post('/api/accounts/<int:account_id>/enforce-limit')
+def run_enforce_limit(account_id):
+    Account.query.get_or_404(account_id)
+    removed = enforce_email_limit(account_id)
+    return jsonify({'ok': True, 'removed': removed})
