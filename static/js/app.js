@@ -4,9 +4,7 @@
 
 async function init() {
   loadSettings();
-  applyTheme();
-  applyLayout();
-  updateSettingsUI();
+  updateSettingsUI();   // chama applyTheme + applyLayout + notif button
   _startAutoSync();
   _initScrollInfinite();
   await loadAccounts();
@@ -36,8 +34,15 @@ function applyLayout() {
 }
 
 function toggleLayout() {
+  // Salva o splitSize atual para o layout que está saindo
+  const key = settings.layout === 'vertical' ? 'splitSizeV' : 'splitSizeH';
+  settings[key] = settings.splitSize;
+  // Troca o layout e restaura o splitSize do novo layout (ou usa default)
   settings.layout = settings.layout === 'vertical' ? 'horizontal' : 'vertical';
-  saveSettings(); applyLayout();
+  const newKey = settings.layout === 'vertical' ? 'splitSizeV' : 'splitSizeH';
+  settings.splitSize = settings[newKey] || (settings.layout === 'vertical' ? 320 : 260);
+  saveSettings();
+  applyLayout();
 }
 
 // ── Resize ────────────────────────────────────────────────────────────────────

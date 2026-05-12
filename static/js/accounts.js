@@ -185,11 +185,8 @@ function selectFolder(accountId, folderKey, realFolders) {
   renderAccountTree();
   loadEmails();
 
-  if (!state.syncErrors[accountId] && !state.syncingIds.has(accountId)) {
-    const elapsed = Date.now() - (state.lastSyncTime[accountId] || 0);
-    if (elapsed >= MIN_SYNC_GAP_MS)
-      fetch(`/api/accounts/${accountId}/sync`, { method: 'POST' });
-  }
+  // Não dispara sync aqui — o IDLE já cuida de manter a INBOX atualizada.
+  // Sync manual fica pelo botão ↻ ou pelo auto-sync configurado.
 }
 
 // ── Modal de contas ───────────────────────────────────────────────────────────

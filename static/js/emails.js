@@ -382,21 +382,21 @@ function _setImapSearchUI(loading) {
 async function syncAll() {
   const btn = document.getElementById('sync-all-btn');
   btn.classList.add('spinning');
+  // Sync manual — não derruba o IDLE, só pede fetch de novos e-mails
   for (const acc of state.accounts) {
-    await fetch(`/api/accounts/${acc.id}/idle-restart`, { method: 'POST' });
+    fetch(`/api/accounts/${acc.id}/sync`, { method: 'POST' }).catch(() => {});
   }
-  setTimeout(() => { loadEmails(); refreshFolderCounts(); btn.classList.remove('spinning'); }, 4000);
+  // UI recarrega via socket sync_done; fallback após 8s
+  setTimeout(() => btn.classList.remove('spinning'), 8000);
 }
 
 async function syncCurrent() {
   const btn = document.getElementById('sync-btn');
   btn.classList.add('spinning');
   if (state.selectedAccountId) {
-    await fetch(`/api/accounts/${state.selectedAccountId}/idle-restart`, { method: 'POST' });
-    setTimeout(() => { loadEmails(); refreshFolderCounts(); btn.classList.remove('spinning'); }, 3000);
-  } else {
-    setTimeout(() => btn.classList.remove('spinning'), 2000);
+    fetch(`/api/accounts/${state.selectedAccountId}/sync`, { method: 'POST' }).catch(() => {});
   }
+  setTimeout(() => btn.classList.remove('spinning'), 5000);
 }
 
 // ── Navegação j/k ─────────────────────────────────────────────────────────────

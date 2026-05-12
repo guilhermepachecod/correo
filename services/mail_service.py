@@ -227,7 +227,7 @@ class MailService:
                     self._flush_batch(account, batch)
 
             # Sync de flags dos 500 mais recentes
-            check_uids = sorted(existing_uids & all_uids_server)[-500:]
+            check_uids = sorted(existing_uids & all_uids_server)[-200:]
             if check_uids:
                 uid_str = ','.join(str(u) for u in check_uids)
                 try:

@@ -20,11 +20,11 @@ log = logging.getLogger(__name__)
 
 
 class IMAPIdleManager:
-    IDLE_TIMEOUT      = 10 * 60   # 10 min em IDLE, depois desconecta
-    IDLE_PAUSE        = 5  * 60   # 5 min desconectado entre sessões
+    IDLE_TIMEOUT      = 25 * 60   # 25 min em IDLE (RFC recomenda < 29 min)
+    IDLE_PAUSE        = 30        # 30s desconectado entre sessões (era 5 min — muito lento)
     OTHER_FOLDERS_INT = 60 * 60   # sync outras pastas a cada 1 hora
-    RECONNECT_BASE    = 30        # backoff inicial (s)
-    RECONNECT_MAX     = 600       # backoff máximo (s)
+    RECONNECT_BASE    = 15        # backoff inicial (s)
+    RECONNECT_MAX     = 300       # backoff máximo 5 min (era 10 — muito conservador)
 
     def __init__(self, mail_service, app):
         self._ms          = mail_service
@@ -237,15 +237,19 @@ class IMAPIdleManager:
 
             if new_uids:
                 if not existing:
-                    log.info(f'IDLE sync inicial {account.email}: {len(new_uids)} e-mails (primeira vez)')
-                    for i in range(0, len(new_uids), 100):
-                        batch    = new_uids[i:i+100]
-                        uid_str  = ','.join(str(u) for u in batch)
-                        _, md    = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
+                    # Primeira vez: baixa os 500 mais recentes em batches de 100
+                    # (evita martelar o servidor com milhares de requests)
+                    recent_new = new_uids[-500:]
+                    log.info(f'IDLE sync inicial {account.email}: {len(recent_new)} e-mails (primeira vez, cap 500)')
+                    for i in range(0, len(recent_new), 100):
+                        batch   = recent_new[i:i+100]
+                        uid_str = ','.join(str(u) for u in batch)
+                        _, md   = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
                         self._process_fetch_data(account, md, 'INBOX')
-                        log.info(f'IDLE sync {account.email}: {min(i+100,len(new_uids))}/{len(new_uids)}')
+                        log.info(f'IDLE sync {account.email}: {min(i+100,len(recent_new))}/{len(recent_new)}')
                 else:
-                    recent = new_uids[-200:]
+                    # Já tem dados: só os 100 mais recentes não baixados
+                    recent = new_uids[-100:]
                     log.info(f'IDLE sync inicial {account.email}: {len(recent)} novos')
                     uid_str = ','.join(str(u) for u in recent)
                     _, md   = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')

@@ -12,8 +12,13 @@ socket.on('sync_done', d => {
   state.syncErrors[d.account_id] = null;
   state.lastSyncTime[d.account_id] = Date.now();
   renderAccountTree();
-  if (!state.selectedAccountId || state.selectedAccountId === d.account_id) {
+  // Só recarrega lista/contagens se houve e-mails novos ou flag_changes
+  const hasChanges = (d.new && d.new > 0) || (d.flag_changes && d.flag_changes > 0);
+  if (hasChanges && (!state.selectedAccountId || state.selectedAccountId === d.account_id)) {
     loadEmails();
+    refreshFolderCounts();
+  } else if (hasChanges) {
+    // Outra conta teve mudanças — atualiza só as contagens da sidebar
     refreshFolderCounts();
   }
   if (d.new && d.new > 0)
