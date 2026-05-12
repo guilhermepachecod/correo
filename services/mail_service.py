@@ -41,18 +41,10 @@ class MailService:
 
     # ── Conexão ───────────────────────────────────────────────────────────────
 
-    def _get_conn(self, account: Account) -> imaplib.IMAP4:
-        pool.register(account)
-        return pool.get(account.id)
-
     def _safe_exec(self, account: Account, fn):
-        """Executa fn(conn), reconectando uma vez em caso de erro de conexão."""
-        try:
-            return fn(self._get_conn(account))
-        except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError, BrokenPipeError) as e:
-            log.warning(f'IMAP reconectando ({account.email}): {e}')
-            pool.invalidate(account.id)
-            return fn(self._get_conn(account))
+        """Abre conexão, executa fn(conn), fecha. Tenta novamente uma vez em caso de erro."""
+        pool.register(account)
+        return pool.safe_exec(account, fn, retries=1)
 
     # ── Idle proxy ────────────────────────────────────────────────────────────
 
@@ -73,9 +65,10 @@ class MailService:
     def test_connection(self, account: Account) -> dict:
         errors = []
         try:
+            from services.imap_pool import connection as imap_connection
             pool.register(account)
-            pool.invalidate(account.id)
-            pool.get(account.id).noop()
+            with imap_connection(account.id) as conn:
+                conn.noop()
         except Exception as e:
             errors.append(f'IMAP: {e}')
         try:
