@@ -4,6 +4,9 @@
 
 async function init() {
   loadSettings();
+  applyTheme();
+  applyLayout();
+  updateSettingsUI();
   _startAutoSync();
   _initScrollInfinite();
   await loadAccounts();

@@ -375,19 +375,19 @@ class MailService:
 
     def mark_read_on_server(self, email_obj: Email) -> None:
         try:
-            self._safe_exec(email_obj.account, lambda c: (
-                c.select(f'"{email_obj.folder}"'),
-                c.uid('store', str(email_obj.uid), '+FLAGS', '\\Seen')
-            ))
+            def _mark(conn):
+                conn.select(f'"{email_obj.folder}"')
+                conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Seen')
+            self._safe_exec(email_obj.account, _mark)
         except Exception as e:
             log.warning(f'mark_read error: {e}')
 
     def mark_unread_on_server(self, email_obj: Email) -> None:
         try:
-            self._safe_exec(email_obj.account, lambda c: (
-                c.select(f'"{email_obj.folder}"'),
-                c.uid('store', str(email_obj.uid), '-FLAGS', '\\Seen')
-            ))
+            def _mark(conn):
+                conn.select(f'"{email_obj.folder}"')
+                conn.uid('store', str(email_obj.uid), '-FLAGS', '\\Seen')
+            self._safe_exec(email_obj.account, _mark)
         except Exception as e:
             log.warning(f'mark_unread error: {e}')
 
