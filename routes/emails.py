@@ -86,8 +86,9 @@ def set_read(email_id):
 @bp.post('/api/emails/<int:email_id>/spam')
 def set_spam(email_id):
     email        = Email.query.get_or_404(email_id)
+    account      = email.account
     mark_as_spam = request.json.get('spam', True)
-    result       = _ms().set_spam(email, mark_as_spam)
+    result       = _ms().set_spam(email, mark_as_spam, account)
     if result:
         db.session.refresh(email)
     return jsonify({'ok': result, 'folder': email.folder})
@@ -97,8 +98,9 @@ def set_spam(email_id):
 
 @bp.delete('/api/emails/<int:email_id>')
 def delete_email(email_id):
-    email = Email.query.get_or_404(email_id)
-    _ms().delete_email(email)
+    email   = Email.query.get_or_404(email_id)
+    account = email.account  # carrega antes de qualquer delete/commit
+    _ms().delete_email(email, account)
     for att in email.attachments:
         att.delete_from_disk()
     db.session.delete(email)
@@ -108,11 +110,12 @@ def delete_email(email_id):
 
 @bp.post('/api/emails/<int:email_id>/move')
 def move_email(email_id):
-    email  = Email.query.get_or_404(email_id)
-    folder = request.json.get('folder')
+    email   = Email.query.get_or_404(email_id)
+    folder  = request.json.get('folder')
     if not folder:
         return jsonify({'error': 'folder obrigatório'}), 400
-    _ms().move_email(email, folder)
+    account = email.account
+    _ms().move_email(email, folder, account)
     return jsonify({'ok': True})
 
 
@@ -168,7 +171,8 @@ def bulk_action():
             elif action == 'mark_not_spam':
                 ms.set_spam(email, False)
             elif action == 'delete':
-                ms.delete_email(email)
+                acc = email.account  # antes do delete
+                ms.delete_email(email, acc)
                 for att in email.attachments: att.delete_from_disk()
                 db.session.delete(email)
             count += 1

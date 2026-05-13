@@ -388,18 +388,20 @@ class MailService:
         except Exception as e:
             log.warning(f'mark_unread error: {e}')
 
-    def set_spam(self, email_obj: Email, mark_as_spam: bool) -> bool:
+    def set_spam(self, email_obj: Email, mark_as_spam: bool, account=None) -> bool:
         try:
-            account = email_obj.account
-            target  = self.find_folder(account, ['spam', 'junk']) if mark_as_spam else 'INBOX'
-            if not target or email_obj.folder.lower() == target.lower():
+            acc    = account or email_obj.account
+            folder = email_obj.folder
+            uid    = str(email_obj.uid)
+            target = self.find_folder(acc, ['spam', 'junk']) if mark_as_spam else 'INBOX'
+            if not target or folder.lower() == target.lower():
                 return bool(target)
             def _move(conn):
-                conn.select(f'"{email_obj.folder}"')
-                conn.uid('copy', str(email_obj.uid), f'"{target}"')
-                conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Deleted')
+                conn.select(f'"{folder}"')
+                conn.uid('copy', uid, f'"{target}"')
+                conn.uid('store', uid, '+FLAGS', '\\Deleted')
                 conn.expunge()
-            self._safe_exec(account, _move)
+            self._safe_exec(acc, _move)
             email_obj.folder = target
             db.session.commit()
             return True
@@ -407,24 +409,30 @@ class MailService:
             log.warning(f'set_spam error: {e}')
             return False
 
-    def delete_email(self, email_obj: Email) -> None:
+    def delete_email(self, email_obj: Email, account: Account = None) -> None:
         try:
+            acc    = account or email_obj.account
+            folder = email_obj.folder
+            uid    = str(email_obj.uid)
             def _delete(conn):
-                conn.select(f'"{email_obj.folder}"')
-                conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Deleted')
+                conn.select(f'"{folder}"')
+                conn.uid('store', uid, '+FLAGS', '\\Deleted')
                 conn.expunge()
-            self._safe_exec(email_obj.account, _delete)
+            self._safe_exec(acc, _delete)
         except Exception as e:
             log.warning(f'delete_email error: {e}')
 
-    def move_email(self, email_obj: Email, target_folder: str) -> None:
+    def move_email(self, email_obj: Email, target_folder: str, account: Account = None) -> None:
         try:
+            acc    = account or email_obj.account
+            folder = email_obj.folder
+            uid    = str(email_obj.uid)
             def _move(conn):
-                conn.select(f'"{email_obj.folder}"')
-                conn.uid('copy', str(email_obj.uid), f'"{target_folder}"')
-                conn.uid('store', str(email_obj.uid), '+FLAGS', '\\Deleted')
+                conn.select(f'"{folder}"')
+                conn.uid('copy', uid, f'"{target_folder}"')
+                conn.uid('store', uid, '+FLAGS', '\\Deleted')
                 conn.expunge()
-            self._safe_exec(email_obj.account, _move)
+            self._safe_exec(acc, _move)
             email_obj.folder = target_folder
             db.session.commit()
         except Exception as e:
