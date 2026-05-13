@@ -52,9 +52,10 @@ def get_emails():
 def get_email(email_id):
     email = Email.query.get_or_404(email_id)
     if not email.is_read:
+        account = email.account  # carrega antes do commit para evitar DetachedInstanceError
         email.is_read = True
         db.session.commit()
-        _ms().mark_read_on_server(email)
+        _ms().mark_read_on_server(email, account)
     return jsonify(email.to_dict())
 
 
@@ -71,13 +72,14 @@ def toggle_star(email_id):
 @bp.post('/api/emails/<int:email_id>/read')
 def set_read(email_id):
     email   = Email.query.get_or_404(email_id)
+    account = email.account  # carrega antes do commit
     is_read = request.json.get('read', True)
     email.is_read = is_read
     db.session.commit()
     if is_read:
-        _ms().mark_read_on_server(email)
+        _ms().mark_read_on_server(email, account)
     else:
-        _ms().mark_unread_on_server(email)
+        _ms().mark_unread_on_server(email, account)
     return jsonify({'read': email.is_read})
 
 
