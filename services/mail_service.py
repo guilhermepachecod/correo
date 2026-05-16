@@ -410,29 +410,38 @@ class MailService:
             return False
 
     def delete_email(self, email_obj: Email, account: Account = None) -> None:
+        acc    = account or email_obj.account
+        folder = email_obj.folder
+        uid    = email_obj.uid
+
+        if not uid:
+            log.warning(f'delete_email: uid é None para email id={email_obj.id}, não é possível deletar no servidor')
+            return
+
+        uid_str = str(uid)
+        log.info(f'delete_email: folder={folder} uid={uid_str} account={acc.email}')
+
         try:
-            acc    = account or email_obj.account
-            folder = email_obj.folder
-            uid    = str(email_obj.uid)
-            trash  = self.find_folder(acc, ['trash', 'deleted', 'lixeira'])
+            trash = self.find_folder(acc, ['trash', 'deleted', 'lixeira'])
+            log.info(f'delete_email: trash={trash}')
 
             if trash and folder.lower() != trash.lower():
-                # Move para Trash — o que Thunderbird faz na maioria dos servidores
                 def _move_trash(conn):
                     conn.select(f'"{folder}"')
-                    conn.uid('copy', uid, f'"{trash}"')
-                    conn.uid('store', uid, '+FLAGS', '\\Deleted')
+                    conn.uid('copy', uid_str, f'"{trash}"')
+                    conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
                     conn.expunge()
                 self._safe_exec(acc, _move_trash)
+                log.info(f'delete_email: movido para {trash} e expunged')
             else:
-                # Já está na Trash ou servidor não tem Trash: expunge direto
                 def _delete(conn):
                     conn.select(f'"{folder}"')
-                    conn.uid('store', uid, '+FLAGS', '\\Deleted')
+                    conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
                     conn.expunge()
                 self._safe_exec(acc, _delete)
+                log.info(f'delete_email: expunged direto de {folder}')
         except Exception as e:
-            log.warning(f'delete_email error: {e}')
+            log.error(f'delete_email error (folder={folder} uid={uid_str}): {e}', exc_info=True)
 
     def move_email(self, email_obj: Email, target_folder: str, account: Account = None) -> None:
         try:
