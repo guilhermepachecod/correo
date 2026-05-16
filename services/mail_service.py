@@ -414,11 +414,23 @@ class MailService:
             acc    = account or email_obj.account
             folder = email_obj.folder
             uid    = str(email_obj.uid)
-            def _delete(conn):
-                conn.select(f'"{folder}"')
-                conn.uid('store', uid, '+FLAGS', '\\Deleted')
-                conn.expunge()
-            self._safe_exec(acc, _delete)
+            trash  = self.find_folder(acc, ['trash', 'deleted', 'lixeira'])
+
+            if trash and folder.lower() != trash.lower():
+                # Move para Trash — o que Thunderbird faz na maioria dos servidores
+                def _move_trash(conn):
+                    conn.select(f'"{folder}"')
+                    conn.uid('copy', uid, f'"{trash}"')
+                    conn.uid('store', uid, '+FLAGS', '\\Deleted')
+                    conn.expunge()
+                self._safe_exec(acc, _move_trash)
+            else:
+                # Já está na Trash ou servidor não tem Trash: expunge direto
+                def _delete(conn):
+                    conn.select(f'"{folder}"')
+                    conn.uid('store', uid, '+FLAGS', '\\Deleted')
+                    conn.expunge()
+                self._safe_exec(acc, _delete)
         except Exception as e:
             log.warning(f'delete_email error: {e}')
 

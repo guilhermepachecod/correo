@@ -302,9 +302,22 @@ async function bulkAction(action) {
   if (['delete', 'mark_spam'].includes(action) && !confirm(`${L[action]} ${ids.length} e-mail(s)?`)) return;
 
   const idSet = new Set(ids);
+  // Para delete/spam, aguarda confirmação do servidor antes de remover da UI
   if (['delete', 'mark_spam'].includes(action)) {
-    state.emails = state.emails.filter(e => !idSet.has(e.id));
-    if (idSet.has(state.selectedEmailId)) { hideEmail(); state.selectedEmailId = null; }
+    try {
+      const res = await fetch('/api/emails/bulk', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
+      });
+      if (!res.ok) { toast('Erro ao executar ação', 'error'); return; }
+      const result = await res.json();
+      state.emails = state.emails.filter(e => !idSet.has(e.id));
+      if (idSet.has(state.selectedEmailId)) { hideEmail(); state.selectedEmailId = null; }
+      state.selectedIds.clear();
+      renderEmailList(); refreshFolderCounts();
+      toast(`${L[action]}: ${result.count} e-mail(s)`, 'success');
+    } catch(e) { toast('Erro ao executar ação', 'error'); }
+    return;
   } else if (action === 'mark_read') {
     state.emails.filter(e => idSet.has(e.id)).forEach(e => { e.is_read = true; _patchEmailItem(e.id, { is_read: true }); });
   } else if (action === 'mark_unread') {

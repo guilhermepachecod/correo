@@ -205,11 +205,16 @@ async function deleteEmail() {
   if (!state.selectedEmailId) return;
   if (!confirm('Excluir este e-mail?')) return;
   const id = state.selectedEmailId;
-  state.emails = state.emails.filter(e => e.id !== id);
-  state.selectedEmailId = null;
-  hideEmail(); renderEmailList(); refreshFolderCounts();
-  toast('E-mail excluído', 'success');
-  fetch(`/api/emails/${id}`, { method: 'DELETE' }).catch(() => {});
+  try {
+    const res = await fetch(`/api/emails/${id}`, { method: 'DELETE' });
+    if (!res.ok) { toast('Erro ao excluir', 'error'); return; }
+    state.emails = state.emails.filter(e => e.id !== id);
+    state.selectedEmailId = null;
+    hideEmail(); renderEmailList(); refreshFolderCounts();
+    toast('E-mail excluído', 'success');
+  } catch(e) {
+    toast('Erro ao excluir', 'error');
+  }
 }
 
 // ── Ações de composição a partir do viewer ────────────────────────────────────
