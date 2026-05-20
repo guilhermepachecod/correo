@@ -175,7 +175,7 @@ document.addEventListener('keydown', e => {
     if (e.key === 'e' && state.selectedEmailId) deleteEmail();
     if (e.key === 's' && state.selectedEmailId) toggleStar();
     if (e.key === '!' && state.selectedEmailId) toggleSpam();
-    if (e.key === 'c') openCompose();
+    // 'c' removido — conflitava com Ctrl+C
     if (e.key === '/') { e.preventDefault(); document.getElementById('search-input')?.focus(); }
   }
 });
