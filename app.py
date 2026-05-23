@@ -73,39 +73,42 @@ def create_app() -> Flask:
 
 
 def _run_migrations(db) -> None:
-    migrations = [
+    """Migrações idempotentes — seguro rodar múltiplas vezes."""
+    simple_migrations = [
         "ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)",
         "ALTER TABLE emails ADD COLUMN thread_id VARCHAR(500)",
         "ALTER TABLE attachments ADD COLUMN file_path VARCHAR(1000)",
-        # Remove NOT NULL do campo data para permitir armazenamento em disco
-        # SQLite não suporta ALTER COLUMN — recria a tabela
-        """CREATE TABLE IF NOT EXISTS attachments_new (
-            id INTEGER PRIMARY KEY,
-            email_id INTEGER NOT NULL REFERENCES emails(id),
-            filename VARCHAR(500) NOT NULL,
-            content_type VARCHAR(255) DEFAULT 'application/octet-stream',
-            size INTEGER DEFAULT 0,
-            file_path VARCHAR(1000),
-            data BLOB
-        )""",
-        "INSERT OR IGNORE INTO attachments_new SELECT id, email_id, filename, content_type, size, file_path, data FROM attachments",
-        "DROP TABLE IF EXISTS attachments_old",
-        "ALTER TABLE attachments RENAME TO attachments_old",
-        "ALTER TABLE attachments_new RENAME TO attachments",
-        "DROP TABLE IF EXISTS attachments_old",
+        "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date ON emails (account_id, folder, date)",
     ]
     with db.engine.connect() as conn:
-        for sql in migrations:
+        for sql in simple_migrations:
             try:
                 conn.execute(db.text(sql)); conn.commit()
             except Exception:
                 pass
+        # Recria tabela attachments só se ainda tiver NOT NULL no campo data
+        # (detecta pela ausência da coluna file_path com nullable)
         try:
-            conn.execute(db.text(
-                "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date "
-                "ON emails (account_id, folder, date)"
-            ))
-            conn.commit()
+            result = conn.execute(db.text("SELECT sql FROM sqlite_master WHERE name='attachments'"))
+            row = result.fetchone()
+            if row and 'file_path' not in (row[0] or ''):
+                for sql in [
+                    """CREATE TABLE IF NOT EXISTS attachments_new (
+                        id INTEGER PRIMARY KEY,
+                        email_id INTEGER NOT NULL REFERENCES emails(id),
+                        filename VARCHAR(500) NOT NULL,
+                        content_type VARCHAR(255) DEFAULT 'application/octet-stream',
+                        size INTEGER DEFAULT 0,
+                        file_path VARCHAR(1000),
+                        data BLOB
+                    )""",
+                    "INSERT OR IGNORE INTO attachments_new SELECT id, email_id, filename, content_type, size, file_path, data FROM attachments",
+                    "DROP TABLE IF EXISTS attachments_old",
+                    "ALTER TABLE attachments RENAME TO attachments_old",
+                    "ALTER TABLE attachments_new RENAME TO attachments",
+                    "DROP TABLE IF EXISTS attachments_old",
+                ]:
+                    conn.execute(db.text(sql)); conn.commit()
         except Exception:
             pass
 

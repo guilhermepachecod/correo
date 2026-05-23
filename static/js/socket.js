@@ -12,16 +12,20 @@ socket.on('sync_done', d => {
   state.syncErrors[d.account_id] = null;
   state.lastSyncTime[d.account_id] = Date.now();
   renderAccountTree();
-  // Só recarrega lista/contagens se houve e-mails novos ou flag_changes
-  const hasChanges = (d.new && d.new > 0) || (d.flag_changes && d.flag_changes > 0);
-  if (hasChanges && (!state.selectedAccountId || state.selectedAccountId === d.account_id)) {
+
+  const isCurrentAccount = !state.selectedAccountId || state.selectedAccountId === d.account_id;
+  const hasNew   = d.new   && d.new   > 0;
+  const hasFlags = d.flag_changes && d.flag_changes > 0;
+
+  if (isCurrentAccount && (hasNew || hasFlags)) {
     loadEmails();
     refreshFolderCounts();
-  } else if (hasChanges) {
-    // Outra conta teve mudanças — atualiza só as contagens da sidebar
+  } else if (hasNew || hasFlags) {
+    // Outra conta — só atualiza contagens da sidebar
     refreshFolderCounts();
   }
-  if (d.new && d.new > 0)
+
+  if (hasNew)
     showSyncNotification(`${d.new} nova${d.new > 1 ? 's' : ''} mensagem${d.new > 1 ? 'ns' : ''} em ${d.email}`);
 });
 
@@ -39,10 +43,17 @@ socket.on('sync_error', d => {
 });
 
 socket.on('new_email', d => {
-  if (!state.selectedAccountId || d.account_id === state.selectedAccountId) {
+  // Só recarrega se estiver vendo INBOX desta conta (ou sem conta selecionada)
+  const isCurrentAccount = !state.selectedAccountId || state.selectedAccountId === d.account_id;
+  const isInbox = !state.selectedFolderReals ||
+    state.selectedFolderReals.some(f => /^inbox$/i.test(f));
+
+  if (isCurrentAccount && isInbox) {
     loadEmails();
-    refreshFolderCounts();
   }
+  // Sempre atualiza contagens da sidebar
+  refreshFolderCounts();
+
   if (d.email) _sendBrowserNotif(d.email.subject, d.email.from_name || d.email.from_addr, d.email);
 });
 
@@ -78,6 +89,4 @@ socket.on('imap_search_done', d => {
   }
 });
 
-socket.on('idle_status', d => {
-  // Pode ser usado futuramente para indicadores de conexão por conta
-});
+socket.on('idle_status', () => {});

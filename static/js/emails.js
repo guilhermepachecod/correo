@@ -57,11 +57,16 @@ function _initScrollInfinite() {
   });
 }
 
+let _loadEmailsAbort = null;
+
 async function loadEmails(append = false) {
   const loading = document.getElementById('list-loading');
   const empty   = document.getElementById('list-empty');
 
   if (!append) {
+    // Cancela qualquer fetch anterior em andamento
+    if (_loadEmailsAbort) { _loadEmailsAbort.abort(); }
+    _loadEmailsAbort = new AbortController();
     state.currentPage = 1;
     state.hasMore = false;
     loading.style.display = 'flex';
@@ -82,7 +87,10 @@ async function loadEmails(append = false) {
       const params = new URLSearchParams({ folder, page: state.currentPage, per_page: PER_PAGE });
       if (accountId) params.set('account_id', String(accountId));
       if (state.searchQuery) params.set('search', state.searchQuery);
-      const data = await (await fetch(`/api/emails?${params}`)).json();
+      const signal = append ? undefined : _loadEmailsAbort?.signal;
+      const res = await fetch(`/api/emails?${params}`, { signal });
+      if (!res.ok) throw new Error('fetch failed');
+      const data = await res.json();
       all = all.concat(data.emails);
       if (data.page < data.pages) anyHasMore = true;
     }
@@ -302,21 +310,18 @@ async function bulkAction(action) {
   if (['delete', 'mark_spam'].includes(action) && !confirm(`${L[action]} ${ids.length} e-mail(s)?`)) return;
 
   const idSet = new Set(ids);
-  // Para delete/spam, aguarda confirmação do servidor antes de remover da UI
   if (['delete', 'mark_spam'].includes(action)) {
-    try {
-      const res = await fetch('/api/emails/bulk', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
-      });
-      if (!res.ok) { toast('Erro ao executar ação', 'error'); return; }
-      const result = await res.json();
-      state.emails = state.emails.filter(e => !idSet.has(e.id));
-      if (idSet.has(state.selectedEmailId)) { hideEmail(); state.selectedEmailId = null; }
-      state.selectedIds.clear();
-      renderEmailList(); refreshFolderCounts();
-      toast(`${L[action]}: ${result.count} e-mail(s)`, 'success');
-    } catch(e) { toast('Erro ao executar ação', 'error'); }
+    // Optimistic: remove da UI imediatamente
+    state.emails = state.emails.filter(e => !idSet.has(e.id));
+    if (idSet.has(state.selectedEmailId)) { hideEmail(); state.selectedEmailId = null; }
+    state.selectedIds.clear();
+    renderEmailList(); refreshFolderCounts();
+    toast(`${L[action]}: ${ids.length} e-mail(s)`, 'success');
+    // Sincroniza no servidor em background
+    fetch('/api/emails/bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
+    }).catch(() => {});
     return;
   } else if (action === 'mark_read') {
     state.emails.filter(e => idSet.has(e.id)).forEach(e => { e.is_read = true; _patchEmailItem(e.id, { is_read: true }); });

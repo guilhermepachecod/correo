@@ -171,6 +171,10 @@ function toggleAccountCollapse(accId, node) {
 // ── Seleção de pasta ──────────────────────────────────────────────────────────
 
 function selectFolder(accountId, folderKey, realFolders) {
+  // Evita reload desnecessário se já está na mesma pasta/conta
+  const sameFolder = state.selectedAccountId === accountId &&
+                     state.selectedFolder === folderKey &&
+                     !state.searchQuery;
   state.selectedAccountId   = accountId;
   state.selectedFolder      = folderKey;
   state.selectedFolderReals = realFolders;
@@ -183,10 +187,7 @@ function selectFolder(accountId, folderKey, realFolders) {
   if (si) si.value = '';
   hideEmail();
   renderAccountTree();
-  loadEmails();
-
-  // Não dispara sync aqui — o IDLE já cuida de manter a INBOX atualizada.
-  // Sync manual fica pelo botão ↻ ou pelo auto-sync configurado.
+  if (!sameFolder) loadEmails();
 }
 
 // ── Modal de contas ───────────────────────────────────────────────────────────

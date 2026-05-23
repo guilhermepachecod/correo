@@ -138,9 +138,9 @@ class IMAPIdleManager:
 
             self._ms._emit('sync_start', {'account_id': account_id, 'email': account.email})
             conn.socket().settimeout(60)
-            self._initial_sync(account, conn)
+            new_count = self._initial_sync(account, conn)
             conn.socket().settimeout(None)
-            self._ms._emit('sync_done', {'account_id': account_id, 'email': account.email, 'new': 0})
+            self._ms._emit('sync_done', {'account_id': account_id, 'email': account.email, 'new': new_count})
 
             if do_full_sync:
                 log.info(f'IDLE {account.email}: sync completo de outras pastas')
@@ -224,7 +224,8 @@ class IMAPIdleManager:
 
     # ── Sync inicial ──────────────────────────────────────────────────────────
 
-    def _initial_sync(self, account: Account, conn) -> None:
+    def _initial_sync(self, account: Account, conn) -> int:
+        """Retorna número de novos e-mails baixados."""
         try:
             _, data = conn.uid('search', None, 'ALL')
             server_uids = [int(u) for u in (data[0].split() if data[0] else [])]
@@ -235,33 +236,33 @@ class IMAPIdleManager:
                                                      .filter_by(account_id=account.id, folder='INBOX').all()}
             new_uids = sorted(set(server_uids) - existing)
 
+            saved = 0
             if new_uids:
                 if not existing:
-                    # Primeira vez: baixa os 500 mais recentes em batches de 100
-                    # (evita martelar o servidor com milhares de requests)
                     recent_new = new_uids[-500:]
                     log.info(f'IDLE sync inicial {account.email}: {len(recent_new)} e-mails (primeira vez, cap 500)')
                     for i in range(0, len(recent_new), 100):
                         batch   = recent_new[i:i+100]
                         uid_str = ','.join(str(u) for u in batch)
                         _, md   = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
-                        self._process_fetch_data(account, md, 'INBOX')
+                        saved  += self._process_fetch_data(account, md, 'INBOX')
                         log.info(f'IDLE sync {account.email}: {min(i+100,len(recent_new))}/{len(recent_new)}')
                 else:
-                    # Já tem dados: só os 100 mais recentes não baixados
                     recent = new_uids[-100:]
                     log.info(f'IDLE sync inicial {account.email}: {len(recent)} novos')
                     uid_str = ','.join(str(u) for u in recent)
                     _, md   = conn.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])')
-                    self._process_fetch_data(account, md, 'INBOX')
+                    saved  += self._process_fetch_data(account, md, 'INBOX')
 
             recent_check = sorted(set(server_uids) & existing)[-200:]
             if recent_check:
                 uid_str = ','.join(str(u) for u in recent_check)
                 _, flag_data = conn.uid('fetch', uid_str, '(UID FLAGS)')
                 self._sync_flags(account, flag_data)
+            return saved
         except Exception as e:
             log.error(f'IDLE sync inicial error {account.email}: {e}', exc_info=True)
+            return 0
 
     def _fetch_new(self, account: Account, conn, seq_from: int, seq_to: int) -> int:
         try:
