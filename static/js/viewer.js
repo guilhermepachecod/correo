@@ -8,17 +8,39 @@ async function openEmail(id) {
   document.querySelectorAll('.email-item').forEach(el =>
     el.classList.toggle('active', parseInt(el.dataset.id) === id));
 
-  const email = await (await fetch(`/api/emails/${id}`)).json();
-  state.currentEmail = email;
-
+  // Marca como lido na lista imediatamente
   const le = state.emails.find(e => e.id === id);
   if (le) { le.is_read = true; _patchEmailItem(id, { is_read: true }); }
 
-  state.emailShowImages = settings.showImagesByDefault;
-  state.emailViewMode   = email.body_html ? 'html' : 'text';
-
+  // Mostra painel imediatamente com dados da lista (que já temos)
   document.getElementById('reading-empty').style.display = 'none';
   document.getElementById('email-view').style.display    = 'flex';
+
+  if (le) {
+    document.getElementById('ev-subject').textContent   = le.subject;
+    document.getElementById('ev-avatar').textContent    = (le.from_name || le.from_addr || '?')[0].toUpperCase();
+    document.getElementById('ev-from-name').textContent = le.from_name || le.from_addr;
+    document.getElementById('ev-from-addr').textContent = `<${le.from_addr}>`;
+    document.getElementById('ev-to-line').textContent   = le.to_addr ? `Para: ${le.to_addr}` : '';
+    document.getElementById('ev-date-meta').textContent = fmtDateFull(le.date);
+    document.getElementById('ev-attachments').style.display = 'none';
+    document.getElementById('ev-junk-banner').classList.remove('visible');
+    // Skeleton no corpo enquanto carrega
+    const bodyHtml = document.getElementById('ev-body-html');
+    const bodyText = document.getElementById('ev-body-text');
+    bodyHtml.style.display = 'block'; bodyText.style.display = 'none';
+    bodyHtml.innerHTML = '<div class="body-skeleton"><div class="skel-line w80"></div><div class="skel-line w60"></div><div class="skel-line w90"></div><div class="skel-line w50"></div><div class="skel-line w70"></div></div>';
+  }
+
+  // Busca dados completos em background
+  const email = await (await fetch(`/api/emails/${id}`)).json();
+
+  // Se o usuário trocou de e-mail enquanto carregava, ignora
+  if (state.selectedEmailId !== id) return;
+
+  state.currentEmail = email;
+  state.emailShowImages = settings.showImagesByDefault;
+  state.emailViewMode   = email.body_html ? 'html' : 'text';
 
   document.getElementById('ev-subject').textContent   = email.subject;
   document.getElementById('ev-avatar').textContent    = (email.from_name || email.from_addr || '?')[0].toUpperCase();
@@ -37,7 +59,6 @@ async function openEmail(id) {
   spamBtn.dataset.isSpam = isSpam ? '1' : '0';
   document.getElementById('ev-junk-banner').classList.toggle('visible', isSpam);
 
-  // Anexos
   const attDiv = document.getElementById('ev-attachments');
   if (email.attachments?.length) {
     attDiv.style.display = 'flex';
@@ -49,7 +70,6 @@ async function openEmail(id) {
     attDiv.innerHTML = '';
   }
 
-  // Botão de thread
   const threadBtn = document.getElementById('ev-thread-btn');
   if (threadBtn) {
     if (email.thread_id) {
@@ -205,13 +225,16 @@ async function deleteEmail() {
   if (!state.selectedEmailId) return;
   if (!confirm('Excluir este e-mail?')) return;
   const id = state.selectedEmailId;
-  // Optimistic: remove da UI imediatamente
-  state.emails = state.emails.filter(e => e.id !== id);
-  state.selectedEmailId = null;
-  hideEmail(); renderEmailList(); refreshFolderCounts();
-  toast('E-mail excluído', 'success');
-  // Sincroniza com servidor em background
-  fetch(`/api/emails/${id}`, { method: 'DELETE' }).catch(() => {});
+  try {
+    const res = await fetch(`/api/emails/${id}`, { method: 'DELETE' });
+    if (!res.ok) { toast('Erro ao excluir', 'error'); return; }
+    state.emails = state.emails.filter(e => e.id !== id);
+    state.selectedEmailId = null;
+    hideEmail(); renderEmailList(); refreshFolderCounts();
+    toast('E-mail excluído', 'success');
+  } catch(e) {
+    toast('Erro ao excluir', 'error');
+  }
 }
 
 // ── Ações de composição a partir do viewer ────────────────────────────────────
