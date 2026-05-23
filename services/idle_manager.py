@@ -21,10 +21,10 @@ log = logging.getLogger(__name__)
 
 class IMAPIdleManager:
     IDLE_TIMEOUT      = 25 * 60   # 25 min em IDLE (RFC recomenda < 29 min)
-    IDLE_PAUSE        = 30        # 30s desconectado entre sessões (era 5 min — muito lento)
+    IDLE_PAUSE        = 5         # 5s entre sessões — quase tempo real
     OTHER_FOLDERS_INT = 60 * 60   # sync outras pastas a cada 1 hora
     RECONNECT_BASE    = 15        # backoff inicial (s)
-    RECONNECT_MAX     = 300       # backoff máximo 5 min (era 10 — muito conservador)
+    RECONNECT_MAX     = 300       # backoff máximo 5 min
 
     def __init__(self, mail_service, app):
         self._ms          = mail_service
