@@ -6,12 +6,50 @@ let folderCountsData = {};
 
 const FOLDER_DEFS = [
   { key: 'inbox',   label: 'Entrada',   icon: '📥', match: f => /^inbox$/i.test(f) },
-  { key: 'drafts',  label: 'Rascunhos', icon: '📝', match: f => /draft/i.test(f) },
+  { key: 'drafts',  label: 'Rascunhos', icon: '📝', match: f => /draft/i.test(f) || /^\[gmail\]\/draft/i.test(f) },
   { key: 'sent',    label: 'Enviados',  icon: '📤', match: f => /^sent$|sent (mail|items|messages)|\.(sent)$/i.test(f) || /^\[gmail\]\/sent/i.test(f) },
-  { key: 'spam',    label: 'Spam',      icon: '🔥', match: f => /spam|junk/i.test(f) },
+  { key: 'spam',    label: 'Spam',      icon: '🔥', match: f => /spam|junk/i.test(f) || /^\[gmail\]\/spam/i.test(f) },
   { key: 'trash',   label: 'Lixeira',   icon: '🗑',  match: f => /trash|deleted|lixeira/i.test(f) || /^\[gmail\]\/trash/i.test(f) },
   { key: 'archive', label: 'Arquivo',   icon: '📦', match: f => /archive|all mail/i.test(f) || /^\[gmail\]\/all/i.test(f) },
 ];
+
+// ── Presets de provedor ───────────────────────────────────────────────────────
+
+const PROVIDER_PRESETS = {
+  gmail: {
+    label: 'Gmail',
+    imap_host: 'imap.gmail.com', imap_port: 993, imap_ssl: true,
+    smtp_host: 'smtp.gmail.com', smtp_port: 587, smtp_ssl: false, smtp_tls: true,
+    hint: 'Use uma Senha de App do Google (não a senha normal)',
+  },
+  outlook: {
+    label: 'Outlook / Hotmail',
+    imap_host: 'outlook.office365.com', imap_port: 993, imap_ssl: true,
+    smtp_host: 'smtp.office365.com',    smtp_port: 587, smtp_ssl: false, smtp_tls: true,
+    hint: 'Use sua senha normal do Microsoft 365',
+  },
+  yahoo: {
+    label: 'Yahoo Mail',
+    imap_host: 'imap.mail.yahoo.com', imap_port: 993, imap_ssl: true,
+    smtp_host: 'smtp.mail.yahoo.com', smtp_port: 587, smtp_ssl: false, smtp_tls: true,
+    hint: 'Use uma Senha de App do Yahoo',
+  },
+};
+
+function applyProviderPreset(key) {
+  const p = PROVIDER_PRESETS[key];
+  if (!p) return;
+  document.getElementById('af-imap-host').value  = p.imap_host;
+  document.getElementById('af-imap-port').value  = p.imap_port;
+  document.getElementById('af-imap-ssl').checked = p.imap_ssl;
+  document.getElementById('af-smtp-host').value  = p.smtp_host;
+  document.getElementById('af-smtp-port').value  = p.smtp_port;
+  document.getElementById('af-smtp-ssl').checked = p.smtp_ssl;
+  document.getElementById('af-smtp-tls').checked = p.smtp_tls;
+  const hint = document.getElementById('provider-hint');
+  if (hint) { hint.textContent = p.hint; hint.style.display = ''; }
+  document.getElementById('af-username').focus();
+}
 
 function matchFolderDef(folderName) {
   return FOLDER_DEFS.find(d => d.match(folderName)) || null;
@@ -171,10 +209,6 @@ function toggleAccountCollapse(accId, node) {
 // ── Seleção de pasta ──────────────────────────────────────────────────────────
 
 function selectFolder(accountId, folderKey, realFolders) {
-  // Evita reload desnecessário se já está na mesma pasta/conta
-  const sameFolder = state.selectedAccountId === accountId &&
-                     state.selectedFolder === folderKey &&
-                     !state.searchQuery;
   state.selectedAccountId   = accountId;
   state.selectedFolder      = folderKey;
   state.selectedFolderReals = realFolders;
@@ -187,7 +221,10 @@ function selectFolder(accountId, folderKey, realFolders) {
   if (si) si.value = '';
   hideEmail();
   renderAccountTree();
-  if (!sameFolder) loadEmails();
+  loadEmails();
+
+  // Não dispara sync aqui — o IDLE já cuida de manter a INBOX atualizada.
+  // Sync manual fica pelo botão ↻ ou pelo auto-sync configurado.
 }
 
 // ── Modal de contas ───────────────────────────────────────────────────────────

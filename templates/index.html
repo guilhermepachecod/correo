@@ -186,7 +186,7 @@
     <div id="compose-body-wrap">
       <textarea id="compose-body" placeholder="Escreva sua mensagem..."></textarea>
     </div>
-    <div id="compose-html-wrap" style="display:none;flex:1;flex-direction:column;min-height:0;">
+    <div id="compose-html-wrap" style="display:none;flex:1;display:none;flex-direction:column;min-height:0;">
       <div id="compose-toolbar">
         <button class="ced-btn" onclick="execCmd('bold')" title="Negrito"><b>B</b></button>
         <button class="ced-btn" onclick="execCmd('italic')" title="Itálico"><i>I</i></button>
@@ -234,7 +234,14 @@
         <div class="conf-hint">Lê os arquivos em <code>/app/accounts/*.conf</code> e sincroniza com o banco.</div>
       </div>
       <hr class="form-divider">
-      <h2 id="account-form-title" style="margin-bottom:14px;font-size:13px;">Adicionar conta</h2>
+      <h2 id="account-form-title" style="margin-bottom:10px;font-size:13px;">Adicionar conta</h2>
+      <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+        <span style="font-size:11px;color:var(--muted);align-self:center;">Preset:</span>
+        <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" onclick="applyProviderPreset('gmail')">Gmail</button>
+        <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" onclick="applyProviderPreset('outlook')">Outlook</button>
+        <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" onclick="applyProviderPreset('yahoo')">Yahoo</button>
+      </div>
+      <div id="provider-hint" style="display:none;font-size:11px;color:var(--amber);background:var(--bg3);border-radius:4px;padding:6px 10px;margin-bottom:10px;border-left:3px solid var(--amber)"></div>
       <div class="form-group"><label class="form-label">Nome de exibição</label><input class="form-input" id="af-name" type="text" placeholder="pessoal"></div>
       <div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="af-email" type="email" placeholder="voce@email.com"></div>
       <div class="form-group"><label class="form-label">Usuário (login)</label><input class="form-input" id="af-username" type="text" placeholder="geralmente o próprio e-mail"></div>

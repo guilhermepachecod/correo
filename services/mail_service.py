@@ -106,8 +106,22 @@ class MailService:
             return ['INBOX']
 
     def find_folder(self, account: Account, keywords: list[str]) -> str | None:
+        folders = self.get_folders(account)
+        # Mapa de aliases Gmail → keywords normais
+        GMAIL_ALIASES = {
+            'spam':    ['[gmail]/spam', 'spam', 'junk'],
+            'junk':    ['[gmail]/spam', 'spam', 'junk'],
+            'trash':   ['[gmail]/trash', 'trash', 'deleted', 'lixeira'],
+            'deleted': ['[gmail]/trash', 'trash', 'deleted', 'lixeira'],
+            'lixeira': ['[gmail]/trash', 'trash', 'deleted', 'lixeira'],
+            'sent':    ['[gmail]/sent mail', 'sent', 'enviados'],
+            'archive': ['[gmail]/all mail', 'archive'],
+        }
+        expanded = []
         for kw in keywords:
-            for f in self.get_folders(account):
+            expanded += GMAIL_ALIASES.get(kw.lower(), [kw.lower()])
+        for kw in expanded:
+            for f in folders:
                 if kw in f.lower():
                     return f
         return None
@@ -393,14 +407,28 @@ class MailService:
             acc    = account or email_obj.account
             folder = email_obj.folder
             uid    = str(email_obj.uid)
-            target = self.find_folder(acc, ['spam', 'junk']) if mark_as_spam else 'INBOX'
+            is_gmail = 'gmail' in (acc.imap_host or '').lower()
+
+            if mark_as_spam:
+                target = self.find_folder(acc, ['spam', 'junk'])
+            else:
+                target = 'INBOX'
+
             if not target or folder.lower() == target.lower():
                 return bool(target)
+
             def _move(conn):
                 conn.select(f'"{folder}"')
+                if is_gmail:
+                    try:
+                        conn.uid('move', uid, f'"{target}"')
+                        return
+                    except Exception:
+                        pass
                 conn.uid('copy', uid, f'"{target}"')
                 conn.uid('store', uid, '+FLAGS', '\\Deleted')
                 conn.expunge()
+
             self._safe_exec(acc, _move)
             email_obj.folder = target
             db.session.commit()
@@ -415,31 +443,50 @@ class MailService:
         uid    = email_obj.uid
 
         if not uid:
-            log.warning(f'delete_email: uid é None para email id={email_obj.id}, não é possível deletar no servidor')
+            log.warning(f'delete_email: uid é None para email id={email_obj.id}')
             return
 
         uid_str = str(uid)
-        log.info(f'delete_email: folder={folder} uid={uid_str} account={acc.email}')
+        is_gmail = 'gmail' in (acc.imap_host or '').lower()
+        log.info(f'delete_email: folder={folder} uid={uid_str} gmail={is_gmail}')
 
         try:
             trash = self.find_folder(acc, ['trash', 'deleted', 'lixeira'])
-            log.info(f'delete_email: trash={trash}')
 
-            if trash and folder.lower() != trash.lower():
-                def _move_trash(conn):
-                    conn.select(f'"{folder}"')
-                    conn.uid('copy', uid_str, f'"{trash}"')
-                    conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
-                    conn.expunge()
-                self._safe_exec(acc, _move_trash)
-                log.info(f'delete_email: movido para {trash} e expunged')
+            if is_gmail:
+                # Gmail: move para lixeira via MOVE ou COPY+DELETE
+                if trash and folder.lower() != trash.lower():
+                    def _gmail_trash(conn):
+                        conn.select(f'"{folder}"')
+                        # Tenta MOVE (extensão IMAP mais eficiente)
+                        try:
+                            conn.uid('move', uid_str, f'"{trash}"')
+                        except Exception:
+                            conn.uid('copy', uid_str, f'"{trash}"')
+                            conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
+                            conn.expunge()
+                    self._safe_exec(acc, _gmail_trash)
+                else:
+                    # Já está na lixeira — apaga de vez
+                    def _gmail_purge(conn):
+                        conn.select(f'"{folder}"')
+                        conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
+                        conn.expunge()
+                    self._safe_exec(acc, _gmail_purge)
             else:
-                def _delete(conn):
-                    conn.select(f'"{folder}"')
-                    conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
-                    conn.expunge()
-                self._safe_exec(acc, _delete)
-                log.info(f'delete_email: expunged direto de {folder}')
+                if trash and folder.lower() != trash.lower():
+                    def _move_trash(conn):
+                        conn.select(f'"{folder}"')
+                        conn.uid('copy', uid_str, f'"{trash}"')
+                        conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
+                        conn.expunge()
+                    self._safe_exec(acc, _move_trash)
+                else:
+                    def _delete(conn):
+                        conn.select(f'"{folder}"')
+                        conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
+                        conn.expunge()
+                    self._safe_exec(acc, _delete)
         except Exception as e:
             log.error(f'delete_email error (folder={folder} uid={uid_str}): {e}', exc_info=True)
 
