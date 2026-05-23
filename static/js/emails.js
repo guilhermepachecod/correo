@@ -337,10 +337,13 @@ async function bulkActionAll(action) {
   if (!state.selectedAccountId) { toast('Selecione uma conta primeiro', 'error'); return; }
   const L = { mark_read: 'Marcar todos como lido', delete: 'Excluir todos' };
   if (!confirm(`${L[action]} na pasta atual?`)) return;
-  const folders = state.selectedFolderReals?.length ? state.selectedFolderReals : ['INBOX'];
+
+  // Captura estado no momento do clique — não usa state depois dos awaits
+  const accountId = state.selectedAccountId;
+  const folders   = state.selectedFolderReals?.length ? [...state.selectedFolderReals] : ['INBOX'];
+  const count     = state.emails.length;
 
   // Optimistic: atualiza UI imediatamente
-  const count = state.emails.length;
   if (action === 'delete') {
     state.emails = []; hideEmail(); state.selectedEmailId = null; renderEmailList();
   } else if (action === 'mark_read') {
@@ -348,35 +351,28 @@ async function bulkActionAll(action) {
   }
   state.selectedIds.clear();
   _updateEmailCountBar();
-  refreshFolderCounts();
   toast(`Processando ${count} e-mail(s)...`, 'info');
 
-  // Confirma no servidor e atualiza contagens reais
-  let totalDone = 0;
-  let hasError  = false;
+  // Confirma no servidor — usa variáveis capturadas, não state
+  let totalDone = 0, hasError = false;
   for (const folder of folders) {
     try {
       const res = await fetch('/api/emails/bulk', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, ids: [], folder, account_id: state.selectedAccountId }),
+        body: JSON.stringify({ action, ids: [], folder, account_id: accountId }),
       });
-      if (res.ok) {
-        const d = await res.json();
-        totalDone += d.count || 0;
-      } else {
-        hasError = true;
-      }
+      if (res.ok) { const d = await res.json(); totalDone += d.count || 0; }
+      else hasError = true;
     } catch(e) { hasError = true; }
   }
 
-  // Recarrega contagens reais do servidor
-  await refreshFolderCounts();
+  // Só atualiza contagens — não mexe na lista (usuário pode ter trocado de pasta)
+  refreshFolderCounts();
 
-  if (hasError) {
-    toast(`Concluído com erros — ${totalDone} e-mail(s) processado(s)`, 'error');
-  } else {
-    toast(`✓ ${L[action]}: ${totalDone} e-mail(s)`, 'success');
-  }
+  toast(hasError
+    ? `Concluído com erros — ${totalDone} e-mail(s) processado(s)`
+    : `✓ ${L[action]}: ${totalDone} e-mail(s)`,
+    hasError ? 'error' : 'success');
 }
 
 // ── Busca IMAP no servidor ────────────────────────────────────────────────────

@@ -21,7 +21,10 @@ def create_app() -> Flask:
         SQLALCHEMY_DATABASE_URI='sqlite:////app/database/mail.db',
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SQLALCHEMY_ENGINE_OPTIONS={
-            'connect_args': {'check_same_thread': False},
+            'connect_args': {
+                'check_same_thread': False,
+                'timeout': 30,           # espera até 30s antes de dar "database is locked"
+            },
             'poolclass': __import__('sqlalchemy.pool', fromlist=['NullPool']).NullPool,
         },
         MAX_CONTENT_LENGTH=25 * 1024 * 1024,
@@ -43,6 +46,15 @@ def create_app() -> Flask:
     with app.app_context():
         _db.create_all()
         _run_migrations(_db)
+        # WAL mode: permite leituras simultâneas com escritas (resolve database is locked)
+        try:
+            with _db.engine.connect() as conn:
+                conn.execute(_db.text('PRAGMA journal_mode=WAL'))
+                conn.execute(_db.text('PRAGMA synchronous=NORMAL'))
+                conn.execute(_db.text('PRAGMA busy_timeout=30000'))
+                conn.commit()
+        except Exception as e:
+            log.warning(f'PRAGMA WAL error: {e}')
 
     # ── Blueprints ─────────────────────────────────────────────────────────────
     from routes.accounts import bp as accounts_bp
@@ -73,42 +85,39 @@ def create_app() -> Flask:
 
 
 def _run_migrations(db) -> None:
-    """Migrações idempotentes — seguro rodar múltiplas vezes."""
-    simple_migrations = [
+    migrations = [
         "ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)",
         "ALTER TABLE emails ADD COLUMN thread_id VARCHAR(500)",
         "ALTER TABLE attachments ADD COLUMN file_path VARCHAR(1000)",
-        "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date ON emails (account_id, folder, date)",
+        # Remove NOT NULL do campo data para permitir armazenamento em disco
+        # SQLite não suporta ALTER COLUMN — recria a tabela
+        """CREATE TABLE IF NOT EXISTS attachments_new (
+            id INTEGER PRIMARY KEY,
+            email_id INTEGER NOT NULL REFERENCES emails(id),
+            filename VARCHAR(500) NOT NULL,
+            content_type VARCHAR(255) DEFAULT 'application/octet-stream',
+            size INTEGER DEFAULT 0,
+            file_path VARCHAR(1000),
+            data BLOB
+        )""",
+        "INSERT OR IGNORE INTO attachments_new SELECT id, email_id, filename, content_type, size, file_path, data FROM attachments",
+        "DROP TABLE IF EXISTS attachments_old",
+        "ALTER TABLE attachments RENAME TO attachments_old",
+        "ALTER TABLE attachments_new RENAME TO attachments",
+        "DROP TABLE IF EXISTS attachments_old",
     ]
     with db.engine.connect() as conn:
-        for sql in simple_migrations:
+        for sql in migrations:
             try:
                 conn.execute(db.text(sql)); conn.commit()
             except Exception:
                 pass
-        # Recria tabela attachments só se ainda tiver NOT NULL no campo data
-        # (detecta pela ausência da coluna file_path com nullable)
         try:
-            result = conn.execute(db.text("SELECT sql FROM sqlite_master WHERE name='attachments'"))
-            row = result.fetchone()
-            if row and 'file_path' not in (row[0] or ''):
-                for sql in [
-                    """CREATE TABLE IF NOT EXISTS attachments_new (
-                        id INTEGER PRIMARY KEY,
-                        email_id INTEGER NOT NULL REFERENCES emails(id),
-                        filename VARCHAR(500) NOT NULL,
-                        content_type VARCHAR(255) DEFAULT 'application/octet-stream',
-                        size INTEGER DEFAULT 0,
-                        file_path VARCHAR(1000),
-                        data BLOB
-                    )""",
-                    "INSERT OR IGNORE INTO attachments_new SELECT id, email_id, filename, content_type, size, file_path, data FROM attachments",
-                    "DROP TABLE IF EXISTS attachments_old",
-                    "ALTER TABLE attachments RENAME TO attachments_old",
-                    "ALTER TABLE attachments_new RENAME TO attachments",
-                    "DROP TABLE IF EXISTS attachments_old",
-                ]:
-                    conn.execute(db.text(sql)); conn.commit()
+            conn.execute(db.text(
+                "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date "
+                "ON emails (account_id, folder, date)"
+            ))
+            conn.commit()
         except Exception:
             pass
 
