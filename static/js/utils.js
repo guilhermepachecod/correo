@@ -7,9 +7,17 @@ function esc(str) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function _parseDate(iso) {
+  if (!iso) return null;
+  // O banco salva em UTC sem sufixo Z — adiciona Z para o browser interpretar corretamente
+  const s = iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z';
+  return new Date(s);
+}
+
 function fmtDate(iso) {
   if (!iso) return '';
-  const d = new Date(iso), now = new Date();
+  const d = _parseDate(iso), now = new Date();
+  if (!d) return '';
   if (d.toDateString() === now.toDateString())
     return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   if (now - d < 7 * 86400000)
@@ -19,7 +27,9 @@ function fmtDate(iso) {
 
 function fmtDateFull(iso) {
   if (!iso) return '';
-  return new Date(iso).toLocaleString('pt-BR', {
+  const d = _parseDate(iso);
+  if (!d) return '';
+  return d.toLocaleString('pt-BR', {
     day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
   });
 }

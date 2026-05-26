@@ -107,19 +107,24 @@ class MailService:
 
     def find_folder(self, account: Account, keywords: list[str]) -> str | None:
         folders = self.get_folders(account)
-        # Mapa de aliases Gmail → keywords normais
-        GMAIL_ALIASES = {
-            'spam':    ['[gmail]/spam', 'spam', 'junk'],
-            'junk':    ['[gmail]/spam', 'spam', 'junk'],
-            'trash':   ['[gmail]/trash', 'trash', 'deleted', 'lixeira'],
-            'deleted': ['[gmail]/trash', 'trash', 'deleted', 'lixeira'],
-            'lixeira': ['[gmail]/trash', 'trash', 'deleted', 'lixeira'],
-            'sent':    ['[gmail]/sent mail', 'sent', 'enviados'],
-            'archive': ['[gmail]/all mail', 'archive'],
+        # Aliases por provedor
+        ALIASES = {
+            'spam':    ['[gmail]/spam', 'inbox.spam', 'inbox.junk', 'spam', 'junk'],
+            'junk':    ['[gmail]/spam', 'inbox.spam', 'inbox.junk', 'spam', 'junk'],
+            'trash':   ['[gmail]/trash', 'inbox.trash', 'inbox.deleted', 'trash', 'deleted', 'lixeira'],
+            'deleted': ['[gmail]/trash', 'inbox.trash', 'inbox.deleted', 'trash', 'deleted', 'lixeira'],
+            'lixeira': ['[gmail]/trash', 'inbox.trash', 'inbox.deleted', 'trash', 'deleted', 'lixeira'],
+            'sent':    ['[gmail]/sent mail', 'inbox.sent', 'sent', 'enviados'],
+            'archive': ['[gmail]/all mail', 'inbox.archive', 'archive'],
         }
         expanded = []
         for kw in keywords:
-            expanded += GMAIL_ALIASES.get(kw.lower(), [kw.lower()])
+            expanded += ALIASES.get(kw.lower(), [kw.lower()])
+        # Busca por match exato primeiro, depois parcial
+        for kw in expanded:
+            for f in folders:
+                if f.lower() == kw:
+                    return f
         for kw in expanded:
             for f in folders:
                 if kw in f.lower():
