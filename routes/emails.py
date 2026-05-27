@@ -52,30 +52,10 @@ def get_emails():
 def get_email(email_id):
     email = Email.query.get_or_404(email_id)
     if not email.is_read:
-        # Salva estado localmente antes de qualquer commit
-        uid      = email.uid
-        folder   = email.folder
-        acc_id   = email.account_id
+        account = email.account  # carrega antes do commit para evitar DetachedInstanceError
         email.is_read = True
         db.session.commit()
-        # Marca como lido no servidor em background — não bloqueia a resposta
-        app = current_app._get_current_object()
-        ms  = _ms()
-        def _mark():
-            with app.app_context():
-                from database import Account as _A
-                acc = _A.query.get(acc_id)
-                if acc:
-                    from services.imap_pool import pool, connection
-                    pool.register(acc)
-                    try:
-                        with connection(acc_id) as conn:
-                            conn.select(f'"{folder}"')
-                            conn.uid('store', str(uid), '+FLAGS', '\\Seen')
-                    except Exception as e:
-                        import logging
-                        logging.getLogger(__name__).warning(f'mark_read bg error: {e}')
-        threading.Thread(target=_mark, daemon=True).start()
+        _ms().mark_read_on_server(email, account)
     return jsonify(email.to_dict())
 
 
