@@ -314,3 +314,25 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* ── Dev credit ── */
+.dev-credit {
+  display: block;
+  margin: 8px 12px 4px;
+  padding: 5px 8px;
+  font-size: 10px;
+  color: var(--muted);
+  text-decoration: none;
+  border-radius: 5px;
+  transition: color .2s, background .2s;
+  opacity: .6;
+}
+.dev-credit:hover {
+  color: var(--text);
+  background: var(--bg3);
+  opacity: 1;
+}
+.dev-credit span {
+  color: var(--accent);
+  font-weight: 500;
+}
