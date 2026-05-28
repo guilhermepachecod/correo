@@ -334,6 +334,7 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
   gap: 4px;
 }
 .app-footer:hover { opacity: 1; }
+.app-footer span { color: var(--text); font-weight: 500; }
 .app-footer a {
   color: var(--muted);
   text-decoration: none;
