@@ -9,15 +9,15 @@ function esc(str) {
 
 function _parseDate(iso) {
   if (!iso) return null;
-  // O banco salva em UTC sem sufixo Z — adiciona Z para o browser interpretar corretamente
-  const s = iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z';
+  // Banco salva em UTC sem Z — adiciona Z para browser interpretar como UTC e converter para local
+  const s = iso.endsWith('Z') || iso.includes('+') || iso.includes('-', 10) ? iso : iso + 'Z';
   return new Date(s);
 }
 
 function fmtDate(iso) {
   if (!iso) return '';
   const d = _parseDate(iso), now = new Date();
-  if (!d) return '';
+  if (!d || isNaN(d)) return '';
   if (d.toDateString() === now.toDateString())
     return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   if (now - d < 7 * 86400000)
@@ -28,7 +28,7 @@ function fmtDate(iso) {
 function fmtDateFull(iso) {
   if (!iso) return '';
   const d = _parseDate(iso);
-  if (!d) return '';
+  if (!d || isNaN(d)) return '';
   return d.toLocaleString('pt-BR', {
     day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
   });

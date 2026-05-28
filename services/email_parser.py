@@ -115,9 +115,11 @@ def parse_email_from_raw(raw: bytes, uid: int, folder: str,
     in_reply_to = (msg.get('In-Reply-To') or '').strip()
 
     try:
+        from datetime import timezone
         date = parsedate_to_datetime(msg.get('Date', ''))
         if date.tzinfo:
-            date = date.replace(tzinfo=None)
+            # Converte para UTC antes de remover o timezone
+            date = date.astimezone(timezone.utc).replace(tzinfo=None)
     except Exception:
         date = datetime.utcnow()
 
