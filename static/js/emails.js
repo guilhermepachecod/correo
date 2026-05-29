@@ -284,7 +284,11 @@ function toggleSelect(e, id) {
   renderBulkBar();
 }
 
-function selectAll()   { state.emails.forEach(e => state.selectedIds.add(e.id)); renderEmailList(); }
+function selectAll() {
+  state.emails.forEach(e => state.selectedIds.add(e.id));
+  renderEmailList();
+  if (state.hasMore) toast(`${state.emails.length} selecionados (só da página atual — role para carregar mais)`, 'info');
+}
 function deselectAll() { state.selectedIds.clear(); renderEmailList(); }
 
 function renderBulkBar() {
@@ -366,7 +370,8 @@ async function bulkActionAll(action) {
     } catch(e) { hasError = true; }
   }
 
-  // Só atualiza contagens — não mexe na lista (usuário pode ter trocado de pasta)
+  // Recarrega lista e contagens reais
+  await loadEmails();
   refreshFolderCounts();
 
   toast(hasError
