@@ -16,6 +16,12 @@ async function openEmail(id) {
   document.getElementById('reading-empty').style.display = 'none';
   document.getElementById('email-view').style.display    = 'flex';
 
+  // Mobile: desliza para o viewer
+  if (window.innerWidth < 768) {
+    document.getElementById('reading-pane').classList.add('active-mobile');
+    document.getElementById('email-list-panel').classList.add('hidden-mobile');
+  }
+
   if (le) {
     document.getElementById('ev-subject').textContent   = le.subject;
     document.getElementById('ev-avatar').textContent    = (le.from_name || le.from_addr || '?')[0].toUpperCase();
@@ -182,6 +188,13 @@ function hideEmail() {
   document.getElementById('ev-junk-banner').classList.remove('visible');
   state.currentEmail = null;
   state.threadOpen   = false;
+}
+
+function closeMobileViewer() {
+  document.getElementById('reading-pane').classList.remove('active-mobile');
+  document.getElementById('email-list-panel').classList.remove('hidden-mobile');
+  hideEmail();
+  state.selectedEmailId = null;
 }
 
 async function toggleStar() {

@@ -145,12 +145,19 @@ def send_email():
 
 @bp.post('/api/emails/bulk')
 def bulk_action():
+    """
+    Executa ações em massa com UMA única conexão IMAP por pasta.
+    Agrupa todos os UIDs e manda em um único comando — evita bloqueio no servidor.
+    """
+    import imaplib
+    from collections import defaultdict
     data       = request.json
     action     = data.get('action')
     ids        = data.get('ids', [])
     folder     = data.get('folder', 'INBOX')
     account_id = data.get('account_id')
     ms         = _ms()
+    log        = current_app.logger
 
     if ids:
         emails = Email.query.filter(Email.id.in_(ids)).all()
@@ -159,27 +166,102 @@ def bulk_action():
         if account_id:
             q = q.filter_by(account_id=account_id)
         emails = q.all()
-    count = 0
+
+    if not emails:
+        return jsonify({'ok': True, 'count': 0})
+
+    # Agrupa por (account_id, folder) — uma conexão IMAP por grupo
+    groups = defaultdict(list)
     for email in emails:
+        groups[(email.account_id, email.folder)].append(email)
+
+    count = 0
+
+    for (acc_id, fldr), group in groups.items():
+        acc  = group[0].account
+        uids = [str(e.uid) for e in group if e.uid]
+        if not uids:
+            continue
+        uid_set  = ','.join(uids)
+        is_gmail = 'gmail' in (acc.imap_host or '').lower()
+
         try:
-            if action == 'mark_read' and not email.is_read:
-                email.is_read = True; ms.mark_read_on_server(email)
-            elif action == 'mark_unread' and email.is_read:
-                email.is_read = False; ms.mark_unread_on_server(email)
-            elif action == 'mark_spam':
-                ms.set_spam(email, True)
-            elif action == 'mark_not_spam':
-                ms.set_spam(email, False)
+            from services.imap_pool import pool, connection
+            pool.register(acc)
+
+            if action == 'mark_read':
+                with connection(acc_id) as conn:
+                    conn.select(f'"{fldr}"')
+                    conn.uid('store', uid_set, '+FLAGS', '\\Seen')
+                db.session.query(Email).filter(
+                    Email.id.in_([e.id for e in group])
+                ).update({'is_read': True}, synchronize_session=False)
+                db.session.commit()
+                count += len(group)
+
+            elif action == 'mark_unread':
+                with connection(acc_id) as conn:
+                    conn.select(f'"{fldr}"')
+                    conn.uid('store', uid_set, '-FLAGS', '\\Seen')
+                db.session.query(Email).filter(
+                    Email.id.in_([e.id for e in group])
+                ).update({'is_read': False}, synchronize_session=False)
+                db.session.commit()
+                count += len(group)
+
             elif action == 'delete':
-                acc = email.account  # antes do delete
-                ms.delete_email(email, acc)
-                for att in email.attachments: att.delete_from_disk()
-                db.session.delete(email)
-            count += 1
+                trash = ms.find_folder(acc, ['trash', 'deleted', 'lixeira'])
+                with connection(acc_id) as conn:
+                    conn.select(f'"{fldr}"')
+                    if trash and fldr.lower() != trash.lower():
+                        try:
+                            if is_gmail:
+                                conn.uid('move', uid_set, f'"{trash}"')
+                            else:
+                                conn.uid('copy', uid_set, f'"{trash}"')
+                                conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
+                                conn.expunge()
+                        except Exception:
+                            conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
+                            conn.expunge()
+                    else:
+                        conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
+                        conn.expunge()
+                for e in group:
+                    for att in e.attachments:
+                        att.delete_from_disk()
+                db.session.query(Email).filter(
+                    Email.id.in_([e.id for e in group])
+                ).delete(synchronize_session=False)
+                db.session.commit()
+                count += len(group)
+
+            elif action in ('mark_spam', 'mark_not_spam'):
+                target = ms.find_folder(acc, ['spam', 'junk']) if action == 'mark_spam' else 'INBOX'
+                if target and fldr.lower() != target.lower():
+                    with connection(acc_id) as conn:
+                        conn.select(f'"{fldr}"')
+                        try:
+                            if is_gmail:
+                                conn.uid('move', uid_set, f'"{target}"')
+                            else:
+                                conn.uid('copy', uid_set, f'"{target}"')
+                                conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
+                                conn.expunge()
+                        except Exception:
+                            conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
+                            conn.expunge()
+                    db.session.query(Email).filter(
+                        Email.id.in_([e.id for e in group])
+                    ).update({'folder': target}, synchronize_session=False)
+                    db.session.commit()
+                    count += len(group)
+
         except Exception as e:
-            from flask import current_app
-            current_app.logger.warning(f'bulk {action} error email {email.id}: {e}')
-    db.session.commit()
+            log.warning(f'bulk {action} error (acc={acc_id} folder={fldr}): {e}')
+            try: db.session.rollback()
+            except Exception: pass
+
     return jsonify({'ok': True, 'count': count})
 
 
