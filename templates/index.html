@@ -31,15 +31,7 @@
       </div>
       <div class="sidebar-setting">
         <span class="sidebar-setting-label">Layout</span>
-        <button id="pref-layout-btn" class="sidebar-setting-btn" onclick="toggleLayout()">⇕ Vertical</button>
-      </div>
-      <div class="sidebar-setting">
-        <span class="sidebar-setting-label">Imagens</span>
-        <button id="pref-images-btn" class="sidebar-setting-btn" onclick="toggleDefaultImages()">🖼 Imgs: OFF</button>
-      </div>
-      <div class="sidebar-setting">
-        <span class="sidebar-setting-label">Formato</span>
-        <button id="pref-mode-btn" class="sidebar-setting-btn" onclick="toggleDefaultViewMode()">HTML</button>
+        <button id="toggle-layout" class="sidebar-setting-btn" onclick="toggleLayout()">⇔ Horizontal</button>
       </div>
       <div class="sidebar-setting">
         <span class="sidebar-setting-label">Notif</span>
@@ -120,6 +112,10 @@
       </div>
 
       <div id="email-view">
+        <div id="mobile-viewer-header">
+          <button id="mobile-back-btn" onclick="closeMobileViewer()">← Voltar</button>
+          <span id="mobile-viewer-title"></span>
+        </div>
         <div id="ev-toolbar">
           <button class="ev-btn" onclick="replyEmail()">↩ Responder</button>
           <button class="ev-btn" onclick="replyAll()">↩↩ Resp. todos</button>

@@ -370,8 +370,9 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
    ════════════════════════════════════════════════════ */
 
 /* Ocultos no desktop por padrão */
-#mobile-header  { display: none; }
-#mobile-back-btn{ display: none; }
+#mobile-header        { display: none; }
+#mobile-back-btn      { display: none; }
+#mobile-viewer-header { display: none; }
 #sidebar-overlay{
   display: none; position: fixed; inset: 0;
   background: rgba(0,0,0,.45); z-index: 199;
@@ -455,6 +456,27 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
   #mobile-title {
     flex: 1; font-size: 13px; font-weight: 600; color: var(--text);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* Header fixo do viewer no mobile */
+  #mobile-viewer-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+    z-index: 5;
+  }
+  #mobile-viewer-title {
+    flex: 1;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Botão voltar no viewer: visível */

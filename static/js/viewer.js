@@ -20,6 +20,9 @@ async function openEmail(id) {
   if (window.innerWidth < 768) {
     document.getElementById('reading-pane').classList.add('active-mobile');
     document.getElementById('email-list-panel').classList.add('hidden-mobile');
+    // Preenche título no header mobile
+    const mvt = document.getElementById('mobile-viewer-title');
+    if (mvt && le) mvt.textContent = le.subject || '';
   }
 
   if (le) {
