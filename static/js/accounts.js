@@ -400,3 +400,14 @@ async function syncConf() {
   } catch(e) { toast('Erro ao sincronizar contas', 'error'); }
   finally { btn.disabled = false; btn.textContent = '⟳ Ler arquivos .conf'; }
 }
+
+// ── Mobile sidebar ─────────────────────────────────────────────────────────────
+function openSidebar() {
+  document.getElementById('sidebar').classList.add('open');
+  document.getElementById('sidebar-overlay').classList.add('visible');
+}
+
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-overlay').classList.remove('visible');
+}
