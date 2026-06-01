@@ -46,7 +46,9 @@ async function openEmail(id) {
 
   state.currentEmail = email;
   state.emailShowImages = settings.showImagesByDefault;
-  state.emailViewMode   = email.body_html ? 'html' : 'text';
+  // Usa modo padrão das configurações, mas só se o e-mail tiver HTML
+  const preferredMode = settings.defaultEmailViewMode || 'html';
+  state.emailViewMode = (preferredMode === 'html' && email.body_html) ? 'html' : 'text';
 
   document.getElementById('ev-subject').textContent   = email.subject;
   document.getElementById('ev-avatar').textContent    = (email.from_name || email.from_addr || '?')[0].toUpperCase();

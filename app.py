@@ -62,8 +62,9 @@ def create_app() -> Flask:
     from routes.folders  import bp as folders_bp
     from routes.filters  import bp as filters_bp
     from routes.idle     import bp as idle_bp
+    from routes.settings import bp as settings_bp
 
-    for bp in [accounts_bp, emails_bp, folders_bp, filters_bp, idle_bp]:
+    for bp in [accounts_bp, emails_bp, folders_bp, filters_bp, idle_bp, settings_bp]:
         app.register_blueprint(bp)
 
     # ── Página principal ───────────────────────────────────────────────────────

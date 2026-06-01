@@ -172,6 +172,31 @@ class EmailFilter(db.Model):
                 'action_star': self.action_star, 'action_delete': self.action_delete}
 
 
+class AppSettings(db.Model):
+    """Preferências globais da aplicação — salvas no banco, sincronizadas entre dispositivos."""
+    __tablename__ = 'app_settings'
+    key   = db.Column(db.String(100), primary_key=True)
+    value = db.Column(db.Text, nullable=False, default='')
+
+    @staticmethod
+    def get(key: str, default=None):
+        row = AppSettings.query.get(key)
+        return row.value if row else default
+
+    @staticmethod
+    def set(key: str, value: str):
+        row = AppSettings.query.get(key)
+        if row:
+            row.value = value
+        else:
+            db.session.add(AppSettings(key=key, value=value))
+        db.session.commit()
+
+    @staticmethod
+    def get_all() -> dict:
+        return {row.key: row.value for row in AppSettings.query.all()}
+
+
 def enforce_email_limit(account_id: int) -> int:
     total = db.session.query(db.func.count(Email.id)).filter_by(account_id=account_id).scalar() or 0
     if total <= MAX_EMAILS_PER_ACCOUNT:

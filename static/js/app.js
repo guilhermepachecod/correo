@@ -3,8 +3,8 @@
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  loadSettings();
-  updateSettingsUI();   // chama applyTheme + applyLayout + notif button
+  await loadSettings();  // carrega do banco antes de qualquer outra coisa
+  updateSettingsUI();
   _startAutoSync();
   _initScrollInfinite();
   await loadAccounts();
@@ -29,7 +29,7 @@ function toggleTheme() {
 function applyLayout() {
   document.getElementById('main-panel').setAttribute('data-layout', settings.layout);
   applySplit();
-  const btn = document.getElementById('toggle-layout');
+  const btn = document.getElementById('pref-layout-btn');
   if (btn) btn.textContent = settings.layout === 'vertical' ? '⇔ Horizontal' : '⇕ Vertical';
 }
 
@@ -96,6 +96,24 @@ function updateSettingsUI() {
   const sel = document.getElementById('autosync-select');
   if (sel) sel.value = String(settings.autoSyncMin || 0);
   _updateNotifButton();
+
+  // Atualiza toggles de preferências de e-mail
+  const imgBtn  = document.getElementById('pref-images-btn');
+  const modeBtn = document.getElementById('pref-mode-btn');
+  const layBtn  = document.getElementById('pref-layout-btn');
+  if (imgBtn)  imgBtn.textContent  = settings.showImagesByDefault ? '🖼 Imgs: ON' : '🖼 Imgs: OFF';
+  if (modeBtn) modeBtn.textContent = (settings.defaultEmailViewMode || 'html') === 'html' ? 'HTML' : 'Texto';
+  if (layBtn)  layBtn.textContent  = settings.layout === 'vertical' ? '⇕ Vertical' : '⇔ Horizontal';
+}
+
+function toggleDefaultImages() {
+  settings.showImagesByDefault = !settings.showImagesByDefault;
+  saveSettings(); updateSettingsUI();
+}
+
+function toggleDefaultViewMode() {
+  settings.defaultEmailViewMode = (settings.defaultEmailViewMode || 'html') === 'html' ? 'text' : 'html';
+  saveSettings(); updateSettingsUI();
 }
 
 // ── Auto-sync ─────────────────────────────────────────────────────────────────
