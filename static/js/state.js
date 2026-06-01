@@ -55,13 +55,13 @@ async function loadSettings() {
       if (data.theme)                settings.theme                = data.theme;
       if (data.layout)               settings.layout               = data.layout;
       if (data.showImagesByDefault !== undefined)
-        settings.showImagesByDefault  = data.showImagesByDefault === 'true';
+        settings.showImagesByDefault  = data.showImagesByDefault.toLowerCase() === 'true';
       if (data.defaultEmailViewMode) settings.defaultEmailViewMode = data.defaultEmailViewMode;
       if (data.splitSize)            settings.splitSize            = parseInt(data.splitSize) || 320;
       if (data.autoSyncMin !== undefined)
         settings.autoSyncMin          = parseInt(data.autoSyncMin) || 0;
       if (data.browserNotifications !== undefined)
-        settings.browserNotifications = data.browserNotifications === 'true';
+        settings.browserNotifications = data.browserNotifications.toLowerCase() === 'true';
     }
   } catch(e) {}
   // Fallback: localStorage para preferências locais (collapsedAccounts etc)

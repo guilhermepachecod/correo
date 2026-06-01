@@ -24,5 +24,9 @@ def save_settings():
     data = request.json or {}
     for key, value in data.items():
         if key in ALLOWED_KEYS:
-            AppSettings.set(key, str(value))
+            # Salva booleanos como 'true'/'false' (minúscula, padrão JS)
+            if isinstance(value, bool):
+                AppSettings.set(key, 'true' if value else 'false')
+            else:
+                AppSettings.set(key, str(value))
     return jsonify({'ok': True})
