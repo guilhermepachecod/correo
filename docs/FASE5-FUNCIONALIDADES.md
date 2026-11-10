@@ -59,19 +59,23 @@ Requisitos:
 - Atalho de teclado: `g a` (todos), `g u` (não lidos), `g s` (estrela).
 
 > **Entregue** (sidebar, `selectUnifiedView`, marcador de conta, badges via
-> `/api/views/counts`) — ver commits `fase5.1: ...`. Ressalvas, por
-> decisão explícita do usuário ou por ainda não ter sido feito:
+> `/api/views/counts`) — ver commits `fase5.1: ...`. Atualização: a
+> rodada seguinte (commits `fase5.3: ...`) fechou a maior parte das
+> ressalvas abaixo:
 > - **"Não lidos" remove a mensagem da lista no momento em que é marcada
 >   como lida** (não "continua até sair da visão") — mudança pedida pelo
->   usuário em relação ao spec original.
-> - Cor do marcador é gerada por hash do e-mail (`_accountColor` em
->   `emails.js`), sem UI de configuração por conta — ainda não feito.
-> - Ações em lote na visão unificada ainda não testadas especificamente
->   (a lógica de agrupar por conta/pasta já existe desde a Fase 2.6 e
->   deveria funcionar, mas não tem teste dedicado pra isso).
-> - Visão padrão ainda é a última pasta/conta selecionada, não "Não
->   lidos" — não mudei o comportamento de abertura do app.
-> - Atalhos de teclado `g a`/`g u`/`g s` não implementados.
+>   usuário em relação ao spec original. Continua assim.
+> - ✅ Cor do marcador agora é configurável por conta (`Account.marker_color`,
+>   picker na tela "Gerenciar contas") — sem cor definida, cai no hash do
+>   e-mail (`_accountColor` em `emails.js`) como antes.
+> - ✅ Ações em lote na visão unificada testadas (`tests/
+>   test_bulk_unified_view.py`): duas contas no mesmo lote, cada uma recebe
+>   seu próprio comando IMAP, nunca misturado.
+> - ✅ Visão inicial ao abrir o app configurável (seletor "Abrir em" no
+>   rodapé da sidebar: Última visão/Todos/Não lidos/Com estrela) — persiste
+>   via `/api/settings` (`startupView`), igual às outras preferências.
+> - ✅ Atalhos `g a`/`g u`/`g s` implementados (chord: tecla `g` seguida de
+>   `a`/`u`/`s` em até 600ms).
 
 ---
 
@@ -108,17 +112,18 @@ Substituir o compose atual por um **modal centralizado e grande**:
 >   assim mesmo — ao reabrir o app, o rascunho é oferecido de volta
 >   automaticamente. Persistência de verdade no servidor (`role=drafts`,
 >   só ao fechar/minimizar, substituindo o rascunho anterior) ficou de fora.
-> - "Salvar cópia em Enviados" configurável por conta não existe — hoje é
->   sempre tentado (`role=sent`), já era o comportamento desde a Fase 2.6.
-> - Atalho `c` para abrir novo compose **não foi restaurado** — já tinha
->   sido removido antes por conflitar com Ctrl+C; não revisitei esse
->   conflito nesta rodada. `Esc` continua **fechando** (com a confirmação
->   de rascunho), não minimizando — mudar isso tocaria o handler
->   compartilhado com os outros modais (contas, filtros) e não parecia
->   valer o risco agora.
+> - ✅ "Salvar cópia em Enviados" agora é configurável por conta
+>   (`Account.save_sent_copy`, checkbox na tela "Gerenciar contas",
+>   default ligado — preserva o comportamento de antes).
+> - ✅ Atalho `c` restaurado (guardado contra Ctrl/Cmd/Alt+C, então não
+>   conflita mais com copiar). `Esc` agora **minimiza** o compose quando
+>   há conteúdo não enviado (em vez de fechar com confirmação) — e fecha
+>   normalmente quando está vazio ou já minimizado.
 > - Corrigi de brinde um bug preexistente: digitar `s`/`e`/`j`/`k` dentro
 >   do editor HTML (contenteditable) disparava os atalhos de teclado da
 >   lista de e-mails (estrela, excluir, navegar) por engano.
+> - **Rascunho no IMAP (`role=drafts` via `APPEND`) continua de fora** —
+>   essa parte não mudou: decisão de risco (fail2ban), não falta de tempo.
 
 ---
 

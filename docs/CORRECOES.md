@@ -251,13 +251,15 @@ Para cada pasta sincronizada:
 - Ao abrir uma pasta na UI, disparar sync incremental dela imediatamente.
 
 > **Entregue** em `services/idle_manager.py` (ver commit `fase2.5: ...`).
-> Pendente: "ao abrir uma pasta na UI, disparar sync incremental dela
-> imediatamente" — ainda não existe rota para isso; hoje só a INBOX (IDLE)
-> e as pastas com role (`CORREO_POLL_SECONDS`) são mantidas atualizadas
-> automaticamente. **Não testado contra um servidor IMAP real** — só com
-> `imapclient.IMAPClient` mockado (sem acesso a um servidor de teste neste
-> ambiente de trabalho). Validar com uma conta real antes de confiar nisso
-> para as 8 contas de produção.
+> ✅ "Ao abrir uma pasta na UI, disparar sync incremental dela" entregue
+> depois (ver commit `fase5.3: ...`): `POST /api/accounts/<id>/folders/
+> <folder>/sync`, chamado por `selectFolder()` no frontend — só na pasta
+> aberta, não na visão unificada inteira (evitaria sincronizar várias
+> pastas de 8 contas de uma vez só por clicar em "Não lidos"). **Não
+> testado contra um servidor IMAP real** — só com `imapclient.IMAPClient`
+> mockado (sem acesso a um servidor de teste neste ambiente de trabalho).
+> Validar com uma conta real antes de confiar nisso para as 8 contas de
+> produção.
 
 ### 2.6 Ações: servidor primeiro (resolve B1, B7)
 Para delete, move, spam, read/unread, star/unstar e bulk:
