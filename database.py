@@ -1,13 +1,20 @@
 from flask_sqlalchemy import SQLAlchemy
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from datetime import datetime
-import os, base64, hashlib
+import os
 
 db = SQLAlchemy()
 
-_SECRET = b'mailapp-fernet-key-v1-stable-2024'
-_KEY    = base64.urlsafe_b64encode(hashlib.sha256(_SECRET).digest())
-_fernet = Fernet(_KEY)
+_fernet_key_env = os.environ.get('CORREO_FERNET_KEY')
+if not _fernet_key_env:
+    raise RuntimeError(
+        'CORREO_FERNET_KEY não definida. Gere uma com scripts/gen_keys.py '
+        'e coloque no .env antes de subir a aplicação.'
+    )
+try:
+    _fernet = Fernet(_fernet_key_env.encode())
+except Exception as e:
+    raise RuntimeError(f'CORREO_FERNET_KEY inválida (precisa ser uma chave Fernet base64): {e}')
 
 ATTACHMENTS_DIR        = os.environ.get('ATTACHMENTS_DIR', '/app/database/attachments')
 MAX_EMAILS_PER_ACCOUNT = int(os.environ.get('MAX_EMAILS_PER_ACCOUNT', 2000))
@@ -38,7 +45,17 @@ class Account(db.Model):
         self.password_enc = plain[4:] if plain.startswith('enc:') else _fernet.encrypt(plain.encode()).decode()
 
     def get_password(self) -> str:
-        return _fernet.decrypt(self.password_enc.encode()).decode()
+        """Descriptografa com a chave atual; se falhar, tenta a chave legada
+        e, em caso de sucesso, recriptografa com a chave atual (migração
+        transparente — ver legacy_crypto.py e scripts/rotate_key.py)."""
+        try:
+            return _fernet.decrypt(self.password_enc.encode()).decode()
+        except InvalidToken:
+            from legacy_crypto import legacy_fernet
+            plain = legacy_fernet.decrypt(self.password_enc.encode()).decode()
+            self.password_enc = _fernet.encrypt(plain.encode()).decode()
+            db.session.commit()
+            return plain
 
     def to_dict(self):
         return {'id': self.id, 'name': self.name, 'email': self.email,
