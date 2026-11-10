@@ -70,9 +70,10 @@ def create_app() -> Flask:
     ext.mail_service = MailService(ext.socketio)
 
     # ── Banco e migrações ──────────────────────────────────────────────────────
+    from database import run_migrations
     with app.app_context():
         _db.create_all()
-        _run_migrations(_db)
+        run_migrations(_db)
         # WAL mode: permite leituras simultâneas com escritas (resolve database is locked)
         try:
             with _db.engine.connect() as conn:
@@ -135,44 +136,6 @@ def create_app() -> Flask:
     os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
     return app
-
-
-def _run_migrations(db) -> None:
-    migrations = [
-        "ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)",
-        "ALTER TABLE emails ADD COLUMN thread_id VARCHAR(500)",
-        "ALTER TABLE attachments ADD COLUMN file_path VARCHAR(1000)",
-        # Remove NOT NULL do campo data para permitir armazenamento em disco
-        # SQLite não suporta ALTER COLUMN — recria a tabela
-        """CREATE TABLE IF NOT EXISTS attachments_new (
-            id INTEGER PRIMARY KEY,
-            email_id INTEGER NOT NULL REFERENCES emails(id),
-            filename VARCHAR(500) NOT NULL,
-            content_type VARCHAR(255) DEFAULT 'application/octet-stream',
-            size INTEGER DEFAULT 0,
-            file_path VARCHAR(1000),
-            data BLOB
-        )""",
-        "INSERT OR IGNORE INTO attachments_new SELECT id, email_id, filename, content_type, size, file_path, data FROM attachments",
-        "DROP TABLE IF EXISTS attachments_old",
-        "ALTER TABLE attachments RENAME TO attachments_old",
-        "ALTER TABLE attachments_new RENAME TO attachments",
-        "DROP TABLE IF EXISTS attachments_old",
-    ]
-    with db.engine.connect() as conn:
-        for sql in migrations:
-            try:
-                conn.execute(db.text(sql)); conn.commit()
-            except Exception:
-                pass
-        try:
-            conn.execute(db.text(
-                "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date "
-                "ON emails (account_id, folder, date)"
-            ))
-            conn.commit()
-        except Exception:
-            pass
 
 
 def _start_idle(app: Flask) -> None:

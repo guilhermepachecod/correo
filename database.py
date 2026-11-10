@@ -38,6 +38,12 @@ class Account(db.Model):
     conf_file    = db.Column(db.String(255), nullable=True)
     created_at   = db.Column(db.DateTime, default=datetime.utcnow)
     last_sync    = db.Column(db.DateTime, nullable=True)
+    # Preenchidos pelo gerenciador de conexão (Fase 2) — circuit breaker de
+    # autenticação: enquanto auth_error não for nulo, nenhuma tentativa nova
+    # de login é feita automaticamente (evita loop de ban no fail2ban).
+    auth_error    = db.Column(db.Text, nullable=True)
+    auth_error_at = db.Column(db.DateTime, nullable=True)
+    capabilities  = db.Column(db.Text, nullable=True)  # JSON da CAPABILITY do servidor
     emails  = db.relationship('Email', backref='account', lazy='dynamic', cascade='all, delete-orphan')
     filters = db.relationship('EmailFilter', backref='account', lazy='dynamic', cascade='all, delete-orphan')
 
@@ -87,6 +93,9 @@ class Email(db.Model):
     has_attachments = db.Column(db.Boolean, default=False)
     in_reply_to     = db.Column(db.String(500), nullable=True)
     created_at      = db.Column(db.DateTime, default=datetime.utcnow)
+    # body_cached=false quando corpo/anexos foram podados (Fase 2.7) — ainda
+    # não há nada que escreva false; reservado para a poda de armazenamento.
+    body_cached     = db.Column(db.Boolean, default=True)
     attachments = db.relationship('Attachment', backref='email', lazy='dynamic', cascade='all, delete-orphan')
     __table_args__ = (
         db.UniqueConstraint('account_id', 'folder', 'uid', name='uq_email_uid'),
@@ -189,6 +198,28 @@ class EmailFilter(db.Model):
                 'action_star': self.action_star, 'action_delete': self.action_delete}
 
 
+class FolderState(db.Model):
+    """Estado de sincronização por pasta IMAP (Fase 2). uidvalidity/uidnext/
+    highestmodseq só passam a ser preenchidos pelo algoritmo de sync
+    incremental (2.4) — por enquanto só `role` é escrito, por
+    services.mail_service.refresh_folder_roles (2.3)."""
+    __tablename__ = 'folder_state'
+    id            = db.Column(db.Integer, primary_key=True)
+    account_id    = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False)
+    folder        = db.Column(db.String(255), nullable=False)
+    uidvalidity   = db.Column(db.Integer, nullable=True)
+    uidnext       = db.Column(db.Integer, nullable=True)
+    highestmodseq = db.Column(db.Integer, nullable=True)
+    last_sync     = db.Column(db.DateTime, nullable=True)
+    role          = db.Column(db.String(20), nullable=True)  # inbox|sent|trash|junk|drafts|archive
+    __table_args__ = (
+        db.UniqueConstraint('account_id', 'folder', name='uq_folder_state_account_folder'),
+    )
+
+    def to_dict(self):
+        return {'folder': self.folder, 'role': self.role}
+
+
 class AppSettings(db.Model):
     """Preferências globais da aplicação — salvas no banco, sincronizadas entre dispositivos."""
     __tablename__ = 'app_settings'
@@ -225,6 +256,96 @@ def enforce_email_limit(account_id: int) -> int:
         db.session.delete(email)
     db.session.commit()
     return len(old_emails)
+
+
+def _migration_001_legacy(conn) -> None:
+    """Migrações antigas (pré-Fase 2), convertidas para o formato versionado
+    sem mudar o efeito: cada ALTER/CREATE é tentado e ignorado se já aplicado
+    (ex.: ALTER TABLE ... ADD COLUMN falha com "duplicate column" se a coluna
+    já existe — é o próprio mecanismo de idempotência que o código anterior
+    já usava)."""
+    statements = [
+        "ALTER TABLE accounts ADD COLUMN conf_file VARCHAR(255)",
+        "ALTER TABLE emails ADD COLUMN thread_id VARCHAR(500)",
+        "ALTER TABLE attachments ADD COLUMN file_path VARCHAR(1000)",
+        """CREATE TABLE IF NOT EXISTS attachments_new (
+            id INTEGER PRIMARY KEY,
+            email_id INTEGER NOT NULL REFERENCES emails(id),
+            filename VARCHAR(500) NOT NULL,
+            content_type VARCHAR(255) DEFAULT 'application/octet-stream',
+            size INTEGER DEFAULT 0,
+            file_path VARCHAR(1000),
+            data BLOB
+        )""",
+        "INSERT OR IGNORE INTO attachments_new SELECT id, email_id, filename, content_type, size, file_path, data FROM attachments",
+        "DROP TABLE IF EXISTS attachments_old",
+        "ALTER TABLE attachments RENAME TO attachments_old",
+        "ALTER TABLE attachments_new RENAME TO attachments",
+        "DROP TABLE IF EXISTS attachments_old",
+        "CREATE INDEX IF NOT EXISTS ix_email_account_folder_date ON emails (account_id, folder, date)",
+    ]
+    for sql in statements:
+        try:
+            conn.execute(db.text(sql)); conn.commit()
+        except Exception:
+            pass
+
+
+def _migration_002_folder_state(conn) -> None:
+    """Fase 2.1: tabela folder_state + colunas novas em emails/accounts."""
+    statements = [
+        """CREATE TABLE IF NOT EXISTS folder_state (
+            id INTEGER PRIMARY KEY,
+            account_id INTEGER NOT NULL REFERENCES accounts(id),
+            folder VARCHAR(255) NOT NULL,
+            uidvalidity INTEGER,
+            uidnext INTEGER,
+            highestmodseq INTEGER,
+            last_sync DATETIME,
+            role VARCHAR(20),
+            UNIQUE(account_id, folder)
+        )""",
+        "ALTER TABLE emails ADD COLUMN body_cached BOOLEAN DEFAULT 1",
+        "ALTER TABLE accounts ADD COLUMN auth_error TEXT",
+        "ALTER TABLE accounts ADD COLUMN auth_error_at DATETIME",
+        "ALTER TABLE accounts ADD COLUMN capabilities TEXT",
+    ]
+    for sql in statements:
+        try:
+            conn.execute(db.text(sql)); conn.commit()
+        except Exception:
+            pass
+
+
+# Lista ordenada de migrações. Cada uma roda exatamente uma vez por banco —
+# a versão aplicada fica registrada em schema_version. Para adicionar uma
+# migração nova, só acrescentar uma tupla (N, fn) no fim, nunca remover ou
+# reordenar as existentes.
+MIGRATIONS = [
+    (1, _migration_001_legacy),
+    (2, _migration_002_folder_state),
+]
+
+
+def run_migrations(db_instance) -> None:
+    with db_instance.engine.connect() as conn:
+        conn.execute(db_instance.text(
+            'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)'
+        ))
+        conn.commit()
+        applied = {
+            row[0] for row in
+            conn.execute(db_instance.text('SELECT version FROM schema_version'))
+        }
+        for version, migration_fn in MIGRATIONS:
+            if version in applied:
+                continue
+            migration_fn(conn)
+            conn.execute(
+                db_instance.text('INSERT INTO schema_version (version) VALUES (:v)'),
+                {'v': version},
+            )
+            conn.commit()
 
 
 def resolve_thread_id(message_id: str, in_reply_to: str) -> str:
