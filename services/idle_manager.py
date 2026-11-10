@@ -181,15 +181,25 @@ class IMAPIdleManager:
             self._ms._emit('idle_status', {'account_id': account_id, 'email': account.email, 'status': 'disconnected'})
 
     def _poll_other_folders(self, account: Account) -> None:
+        """Sincroniza todas as pastas com role conhecido e emite **um único**
+        sync_done agregado no final — evitar um evento por pasta é o que
+        evita a sidebar re-renderizar (e piscar) várias vezes em sequência
+        só porque a conta tem Enviados/Lixeira/Spam/Rascunhos sincronizando
+        no mesmo ciclo de poll."""
+        total_new, total_flags, total_removed = 0, 0, 0
         for folder in self._ms.sync_folders_to_track(account):
             try:
                 result = self._ms.sync_folder_incremental(account, folder)
-                if result.get('new') or result.get('flag_changes') or result.get('removed'):
-                    self._ms._emit('sync_done', {
-                        'account_id': account.id, 'email': account.email,
-                        'new': result.get('new', 0), 'flag_changes': result.get('flag_changes', 0),
-                    })
+                total_new     += result.get('new', 0)
+                total_flags   += result.get('flag_changes', 0)
+                total_removed += result.get('removed', 0)
             except AuthCircuitOpen:
                 raise
             except Exception as e:
                 log.warning(f'poll pasta {account.email}/{folder} error: {e}')
+
+        if total_new or total_flags or total_removed:
+            self._ms._emit('sync_done', {
+                'account_id': account.id, 'email': account.email,
+                'new': total_new, 'flag_changes': total_flags,
+            })

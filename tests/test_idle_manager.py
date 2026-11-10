@@ -138,3 +138,56 @@ def test_loop_never_retries_login_while_auth_error_is_set(monkeypatch):
 
     assert not t.is_alive()
     assert FakeIdleClient.login_calls == 0   # nenhuma tentativa de login
+
+
+def test_poll_other_folders_emits_a_single_aggregated_sync_done(monkeypatch):
+    """O bug que causava a sidebar piscando: um sync_done por pasta. Com
+    4 pastas sincronizando no mesmo ciclo de poll, tem que emitir só 1
+    evento com os totais somados — não 4."""
+    with app.app_context():
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('idle4@example.com')
+
+        ms = MailService(socketio=None)
+        monkeypatch.setattr(ms, 'sync_folders_to_track',
+                            lambda account: ['Sent', 'Trash', 'Junk', 'Drafts'])
+
+        results_by_folder = {
+            'Sent':   {'ok': True, 'new': 1, 'flag_changes': 0, 'removed': 0},
+            'Trash':  {'ok': True, 'new': 0, 'flag_changes': 2, 'removed': 0},
+            'Junk':   {'ok': True, 'new': 0, 'flag_changes': 0, 'removed': 1},
+            'Drafts': {'ok': True, 'new': 0, 'flag_changes': 0, 'removed': 0},
+        }
+        monkeypatch.setattr(ms, 'sync_folder_incremental',
+                            lambda account, folder: results_by_folder[folder])
+
+        events = []
+        monkeypatch.setattr(ms, '_emit', lambda event, data: events.append((event, data)))
+
+        im = IMAPIdleManager(ms, app)
+        im._poll_other_folders(acc)
+
+        sync_done_events = [e for e in events if e[0] == 'sync_done']
+        assert len(sync_done_events) == 1
+        assert sync_done_events[0][1]['new'] == 1
+        assert sync_done_events[0][1]['flag_changes'] == 2
+
+
+def test_poll_other_folders_emits_nothing_when_no_changes(monkeypatch):
+    with app.app_context():
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('idle5@example.com')
+
+        ms = MailService(socketio=None)
+        monkeypatch.setattr(ms, 'sync_folders_to_track', lambda account: ['Sent', 'Trash'])
+        monkeypatch.setattr(ms, 'sync_folder_incremental',
+                            lambda account, folder: {'ok': True, 'new': 0, 'flag_changes': 0, 'removed': 0})
+        events = []
+        monkeypatch.setattr(ms, '_emit', lambda event, data: events.append((event, data)))
+
+        im = IMAPIdleManager(ms, app)
+        im._poll_other_folders(acc)
+
+        assert events == []
