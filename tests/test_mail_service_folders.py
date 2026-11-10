@@ -1,22 +1,11 @@
 """
-Testa o parsing da resposta LIST do IMAP e refresh_folder_roles (Fase 2.3),
-sem servidor real — _safe_exec é substituído por um fake que devolve linhas
-LIST sintéticas.
+Testa refresh_folder_roles e role_folder (Fase 2.3/2.4), sem servidor real —
+_safe_exec é substituído por um fake que devolve o formato de
+imapclient.list_folders(): lista de (flags, delimiter, name).
 """
 from app import app
 from database import db, Account, FolderState
-from services.mail_service import MailService, _parse_list_line
-
-
-def test_parse_list_line_variants():
-    assert _parse_list_line(r'(\HasNoChildren \Trash) "." "INBOX.Trash"') == (
-        [r'\HasNoChildren', r'\Trash'], 'INBOX.Trash',
-    )
-    assert _parse_list_line(r'(\HasNoChildren) "." INBOX') == ([r'\HasNoChildren'], 'INBOX')
-    assert _parse_list_line(r'(\HasNoChildren \Sent) "/" "[Gmail]/Sent Mail"') == (
-        [r'\HasNoChildren', r'\Sent'], '[Gmail]/Sent Mail',
-    )
-    assert _parse_list_line('garbage') is None
+from services.mail_service import MailService
 
 
 def _make_account(email):
@@ -35,10 +24,10 @@ def test_refresh_folder_roles_writes_folder_state(monkeypatch):
         acc = _make_account('folders-test@example.com')
 
         raw_list = [
-            b'(\\HasNoChildren) "." "INBOX"',
-            b'(\\HasNoChildren \\Trash) "." "INBOX.Trash"',
-            b'(\\HasNoChildren \\Sent) "." "INBOX.Sent"',
-            b'(\\HasNoChildren) "." "INBOX.Projetos"',  # sem SPECIAL-USE nem nome conhecido
+            ((b'\\HasNoChildren',), '.', 'INBOX'),
+            ((b'\\HasNoChildren', b'\\Trash'), '.', 'INBOX.Trash'),
+            ((b'\\HasNoChildren', b'\\Sent'), '.', 'INBOX.Sent'),
+            ((b'\\HasNoChildren',), '.', 'INBOX.Projetos'),  # sem SPECIAL-USE nem nome conhecido
         ]
 
         ms = MailService(socketio=None)
@@ -72,3 +61,29 @@ def test_refresh_folder_roles_returns_empty_on_imap_error(monkeypatch):
         monkeypatch.setattr(ms, '_safe_exec', _raise)
 
         assert ms.refresh_folder_roles(acc) == {}
+
+
+def test_role_folder_uses_folder_state_first(monkeypatch):
+    with app.app_context():
+        db.session.query(FolderState).delete()
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('role-folder@example.com')
+        db.session.add(FolderState(account_id=acc.id, folder='INBOX.Trash', role='trash'))
+        db.session.commit()
+
+        ms = MailService(socketio=None)
+        assert ms.role_folder(acc, 'trash') == 'INBOX.Trash'
+
+
+def test_role_folder_falls_back_to_name_keyword(monkeypatch):
+    with app.app_context():
+        db.session.query(FolderState).delete()
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('role-folder-fallback@example.com')
+
+        ms = MailService(socketio=None)
+        monkeypatch.setattr(ms, 'get_folders', lambda account: ['INBOX', 'INBOX.Lixeira'])
+        assert ms.role_folder(acc, 'trash') == 'INBOX.Lixeira'
+        assert ms.role_folder(acc, 'archive') is None

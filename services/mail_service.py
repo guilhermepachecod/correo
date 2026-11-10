@@ -1,22 +1,31 @@
 """
 services/mail_service.py
-Operações de e-mail: sync de pastas, envio SMTP, flags, spam, move.
-Depende de: imap_pool, email_parser, database.
-O IMAPIdleManager é injetado externamente (evita import circular).
+Operações de e-mail: sync de pastas (incremental, por UID — Fase 2.4),
+ações servidor-primeiro (Fase 2.6), envio SMTP, pastas especiais (2.3).
+
+Depende de: imap_connection (conexão persistente por conta), email_parser,
+database. O IMAPIdleManager é injetado externamente (evita import circular).
+
+Fase 2.4-2.7: substitui o antigo services/imap_pool.py (uma conexão nova por
+operação — bug B8/fail2ban) por services/imap_connection.py (conexão
+persistente, imapclient). Sync por pasta agora é por UID com UIDVALIDITY
+(bugs B2/B3/B5/B6/B9) e as ações (delete/move/spam) só tocam o banco local
+depois que o servidor confirma, e nunca fazem EXPUNGE genérico (bugs B1/B7).
 """
-import imaplib
-import smtplib
-import re
+import json
 import logging
-from datetime import datetime
+import smtplib
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
+from imapclient import IMAPClient
+
 from database import db, Email, Attachment, EmailFilter, Account, FolderState, \
-    enforce_email_limit, resolve_thread_id
-from services.imap_pool import pool
+    resolve_thread_id, BODY_RETENTION_DAYS, MAX_BODIES_PER_ACCOUNT
+from services.imap_connection import manager as conn_manager, AuthCircuitOpen
 from services.email_parser import parse_email_from_raw
 from services.special_folders import detect_role
 
@@ -24,18 +33,13 @@ log = logging.getLogger(__name__)
 
 BATCH_SIZE = 50
 
-_LIST_LINE_RE = re.compile(r'^\((?P<flags>[^)]*)\)\s+"(?P<delim>[^"]*)"\s+(?P<name>.*)$')
+
+def _flag_str(flag) -> str:
+    return flag.decode('ascii', errors='ignore') if isinstance(flag, bytes) else str(flag)
 
 
-def _parse_list_line(raw: str):
-    """Faz o parse de uma linha da resposta de LIST do IMAP:
-    '(<flags>) "<delimitador>" <nome>' → ([flags], nome). None se não casar."""
-    m = _LIST_LINE_RE.match(raw.strip())
-    if not m:
-        return None
-    flags = m.group('flags').split()
-    name = m.group('name').strip().strip('"')
-    return flags, name
+def _has_flag(flags, name: str) -> bool:
+    return any(_flag_str(f) == name for f in (flags or ()))
 
 
 class MailService:
@@ -53,36 +57,74 @@ class MailService:
         except Exception:
             pass
 
-    # ── Conexão ───────────────────────────────────────────────────────────────
+    # ── Conexão (Fase 2.2/2.4) ───────────────────────────────────────────────
+
+    def _get_connection(self, account: Account):
+        return conn_manager.register(
+            account.id, account.imap_host, account.imap_port, account.imap_ssl,
+            account.username, account.get_password,
+            on_auth_error=self._on_auth_error, on_capabilities=self._on_capabilities,
+        )
 
     def _safe_exec(self, account: Account, fn):
-        """Abre conexão, executa fn(conn), fecha. Tenta novamente uma vez em caso de erro."""
-        pool.register(account)
-        return pool.safe_exec(account, fn, retries=1)
+        """Executa fn(client) na conexão persistente da conta (imapclient) —
+        substitui o imap_pool antigo (uma conexão/login por operação)."""
+        return self._get_connection(account).execute(fn)
 
-    # ── Idle proxy ────────────────────────────────────────────────────────────
+    def _on_auth_error(self, account_id: int, message: str) -> None:
+        account = Account.query.get(account_id)
+        if not account:
+            return
+        account.auth_error    = message
+        account.auth_error_at = datetime.utcnow()
+        db.session.commit()
+        log.error(f'Erro de autenticação permanente account_id={account_id}: {message}')
+        self._emit('sync_error', {
+            'account_id': account_id,
+            'error': f'Erro de autenticação: verifique usuário/senha ({message})',
+            'auth_failed': True,
+        })
 
-    def start_idle_for(self, account_id: int) -> None:
-        if self.idle_manager:
-            self.idle_manager.start_account(account_id)
+    def _on_capabilities(self, account_id: int, caps: set) -> None:
+        account = Account.query.get(account_id)
+        if not account:
+            return
+        account.capabilities = json.dumps(sorted(caps))
+        db.session.commit()
 
-    def stop_idle_for(self, account_id: int) -> None:
-        if self.idle_manager:
-            self.idle_manager.stop_account(account_id)
+    def reset_auth_error(self, account_id: int) -> None:
+        """Chamado quando a conta é editada ou o usuário pede retry manual —
+        único jeito de uma conta bloqueada por auth voltar a tentar logar."""
+        conn_manager.reset_auth_error(account_id)
+        account = Account.query.get(account_id)
+        if account and account.auth_error:
+            account.auth_error    = None
+            account.auth_error_at = None
+            db.session.commit()
 
-    def restart_idle_for(self, account_id: int) -> None:
-        if self.idle_manager:
-            self.idle_manager.restart_account(account_id)
+    def _capabilities(self, account: Account) -> set:
+        if not account.capabilities:
+            return set()
+        try:
+            return set(json.loads(account.capabilities))
+        except Exception:
+            return set()
 
     # ── Test ──────────────────────────────────────────────────────────────────
 
     def test_connection(self, account: Account) -> dict:
+        """Teste de conectividade avulso — usa uma conexão própria, não a
+        persistente da conta (não deve interferir no estado do IDLE/sync)."""
         errors = []
         try:
-            from services.imap_pool import connection as imap_connection
-            pool.register(account)
-            with imap_connection(account.id) as conn:
-                conn.noop()
+            client = IMAPClient(account.imap_host, port=account.imap_port,
+                                ssl=account.imap_ssl, timeout=10)
+            try:
+                client.login(account.username, account.get_password())
+                client.noop()
+            finally:
+                try: client.shutdown()
+                except Exception: pass
         except Exception as e:
             errors.append(f'IMAP: {e}')
         try:
@@ -98,90 +140,34 @@ class MailService:
             errors.append(f'SMTP: {e}')
         return {'ok': not errors, 'errors': errors}
 
-    # ── Pastas ────────────────────────────────────────────────────────────────
+    # ── Pastas (Fase 2.3) ────────────────────────────────────────────────────
 
     def get_folders(self, account: Account) -> list[str]:
         if account.id in self._folder_cache:
             return self._folder_cache[account.id]
         try:
-            folder_list = self._safe_exec(account, lambda c: c.list()[1])
-            folders = []
-            for item in folder_list:
-                if isinstance(item, bytes):
-                    decoded = item.decode('utf-8', errors='replace')
-                    m = re.search(r'\(.*?\)\s+"?[./]"?\s+(.*)', decoded)
-                    if m:
-                        folders.append(m.group(1).strip().strip('"'))
-            log.info(f'Pastas de {account.email}: {folders}')
+            raw = self._safe_exec(account, lambda c: c.list_folders())
+            folders = [name for _flags, _delim, name in raw]
             self._folder_cache[account.id] = folders
             return folders
         except Exception as e:
-            log.error(f'get_folders error: {e}')
+            log.error(f'get_folders error {account.email}: {e}')
             return ['INBOX']
 
-    def find_folder(self, account: Account, keywords: list[str]) -> str | None:
-        folders = self.get_folders(account)
-        # Aliases por provedor
-        ALIASES = {
-            'spam':    ['[gmail]/spam', 'inbox.spam', 'inbox.junk', 'spam', 'junk'],
-            'junk':    ['[gmail]/spam', 'inbox.spam', 'inbox.junk', 'spam', 'junk'],
-            'trash':   ['[gmail]/trash', 'inbox.trash', 'inbox.deleted', 'trash', 'deleted', 'lixeira'],
-            'deleted': ['[gmail]/trash', 'inbox.trash', 'inbox.deleted', 'trash', 'deleted', 'lixeira'],
-            'lixeira': ['[gmail]/trash', 'inbox.trash', 'inbox.deleted', 'trash', 'deleted', 'lixeira'],
-            'sent':    ['[gmail]/sent mail', 'inbox.sent', 'sent', 'enviados'],
-            'archive': ['[gmail]/all mail', 'inbox.archive', 'archive'],
-        }
-        expanded = []
-        for kw in keywords:
-            expanded += ALIASES.get(kw.lower(), [kw.lower()])
-        # Busca por match exato primeiro, depois parcial
-        for kw in expanded:
-            for f in folders:
-                if f.lower() == kw:
-                    return f
-        for kw in expanded:
-            for f in folders:
-                if kw in f.lower():
-                    return f
-        return None
-
-    def _get_sync_folders(self, account: Account) -> list[str]:
-        folders = self.get_folders(account)
-        priority = ['inbox', 'sent', 'drafts', 'junk', 'spam', 'trash', 'archive']
-        result = []
-        for kw in priority:
-            for f in folders:
-                if kw in f.lower() and f not in result:
-                    result.append(f)
-        for f in folders:
-            if f not in result:
-                result.append(f)
-        return result[:10]
-
     def refresh_folder_roles(self, account: Account) -> dict[str, str | None]:
-        """Fase 2.3: detecta o role (inbox/sent/trash/junk/drafts/archive)
-        de cada pasta via SPECIAL-USE (RFC 6154) ou, na falta, pelo nome, e
-        grava em FolderState. Usa a mesma conexão (imap_pool) e o mesmo
-        comando LIST que get_folders() já usa — não muda nada do algoritmo
-        de sync existente, só preenche FolderState.role para quem for
-        consumir isso (visões unificadas, ações servidor-primeiro — ambas
-        fora do escopo desta função)."""
+        """Detecta o role de cada pasta (SPECIAL-USE ou nome) e grava em
+        FolderState — base das ações servidor-primeiro (2.6) e das visões
+        unificadas (2.9)."""
         result: dict[str, str | None] = {}
         try:
-            raw_list = self._safe_exec(account, lambda c: c.list()[1])
+            raw = self._safe_exec(account, lambda c: c.list_folders())
         except Exception as e:
             log.warning(f'refresh_folder_roles error {account.email}: {e}')
             return result
 
         existing = {fs.folder: fs for fs in
                     FolderState.query.filter_by(account_id=account.id).all()}
-        for item in raw_list:
-            if not isinstance(item, bytes):
-                continue
-            parsed = _parse_list_line(item.decode('utf-8', errors='replace'))
-            if not parsed:
-                continue
-            flags, name = parsed
+        for flags, _delim, name in raw:
             role = detect_role(name, flags)
             result[name] = role
             fs = existing.get(name)
@@ -194,10 +180,231 @@ class MailService:
         db.session.commit()
         return result
 
-    # ── Sync ─────────────────────────────────────────────────────────────────
+    def role_folder(self, account: Account, role: str) -> str | None:
+        """Pasta com o role dado (ex. 'trash', 'sent', 'junk'). Fallback por
+        palavra-chave no nome se refresh_folder_roles ainda não rodou pra
+        essa conta."""
+        fs = FolderState.query.filter_by(account_id=account.id, role=role).first()
+        if fs:
+            return fs.folder
+        keywords = {
+            'trash': ['trash', 'deleted', 'lixeira'],
+            'junk':  ['spam', 'junk'],
+            'sent':  ['sent', 'enviados'],
+            'drafts': ['drafts', 'rascunhos'],
+            'archive': ['archive', 'arquivo'],
+            'inbox': ['inbox'],
+        }.get(role, [role])
+        return self._find_folder_by_keyword(account, keywords)
+
+    def _find_folder_by_keyword(self, account: Account, keywords: list[str]) -> str | None:
+        folders = self.get_folders(account)
+        for kw in keywords:
+            for f in folders:
+                if f.lower() == kw:
+                    return f
+        for kw in keywords:
+            for f in folders:
+                if kw in f.lower():
+                    return f
+        return None
+
+    def sync_folders_to_track(self, account: Account) -> list[str]:
+        """Pastas que entram no ciclo de poll periódico (role conhecido) —
+        IDLE cobre a INBOX, isso aqui cobre o resto (2.5)."""
+        rows = FolderState.query.filter_by(account_id=account.id).filter(
+            FolderState.role.isnot(None), FolderState.role != 'inbox').all()
+        return [r.folder for r in rows]
+
+    # ── Sync incremental por pasta (Fase 2.4) ────────────────────────────────
+
+    def sync_folder_incremental(self, account: Account, folder: str) -> dict:
+        """UID + UIDVALIDITY, sem cap que descarta mensagem, sem EXPUNGE,
+        sem número de sequência — resolve B2, B3, B5, B6, B9."""
+        try:
+            select_info = self._safe_exec(account, lambda c: c.select_folder(folder, readonly=False))
+        except AuthCircuitOpen:
+            return {'ok': False, 'error': 'auth_blocked'}
+        except Exception as e:
+            log.warning(f'sync_folder_incremental select error {account.email}/{folder}: {e}')
+            return {'ok': False, 'error': str(e)}
+
+        uidvalidity = select_info.get(b'UIDVALIDITY')
+        uidnext_srv = select_info.get(b'UIDNEXT')
+
+        fs = FolderState.query.filter_by(account_id=account.id, folder=folder).first()
+        if not fs:
+            fs = FolderState(account_id=account.id, folder=folder)
+            db.session.add(fs)
+            db.session.flush()
+
+        if fs.uidvalidity is not None and uidvalidity is not None and fs.uidvalidity != uidvalidity:
+            log.warning(f'UIDVALIDITY mudou {account.email}/{folder}: '
+                        f'{fs.uidvalidity} -> {uidvalidity}; reindexando pasta')
+            removed = Email.query.filter_by(account_id=account.id, folder=folder).all()
+            for e in removed:
+                for att in e.attachments:
+                    att.delete_from_disk()
+            Email.query.filter_by(account_id=account.id, folder=folder).delete(synchronize_session=False)
+            db.session.commit()
+            fs.uidvalidity = None
+
+        try:
+            all_uids = set(self._safe_exec(account, lambda c: c.search('ALL')))
+        except Exception as e:
+            log.warning(f'sync_folder_incremental search error {account.email}/{folder}: {e}')
+            return {'ok': False, 'error': str(e)}
+
+        existing_rows = {r.uid: r for r in
+                         Email.query.filter_by(account_id=account.id, folder=folder).all()}
+        existing_uids = set(existing_rows)
+
+        new_uids = sorted(all_uids - existing_uids)
+        new_count = 0
+        for i in range(0, len(new_uids), BATCH_SIZE):
+            batch = new_uids[i:i + BATCH_SIZE]
+            try:
+                data = self._safe_exec(account, lambda c: c.fetch(batch, ['FLAGS', 'BODY.PEEK[]']))
+            except Exception as e:
+                log.warning(f'sync_folder_incremental fetch error {account.email}/{folder}: {e}')
+                break
+            new_count += self._save_fetched(account, folder, data)
+
+        flag_changes = 0
+        check_uids = sorted(existing_uids & all_uids)
+        if check_uids:
+            try:
+                flag_data = self._safe_exec(account, lambda c: c.fetch(check_uids, ['FLAGS']))
+                flag_changes = self._apply_flag_updates(account, folder, flag_data, existing_rows)
+            except Exception as e:
+                log.warning(f'sync_folder_incremental flags error {account.email}/{folder}: {e}')
+
+        removed_rows = [existing_rows[u] for u in (existing_uids - all_uids)]
+        if removed_rows:
+            removed_ids = [r.id for r in removed_rows]
+            for r in removed_rows:
+                for att in r.attachments:
+                    att.delete_from_disk()
+            Email.query.filter(Email.id.in_(removed_ids)).delete(synchronize_session=False)
+            db.session.commit()
+            self._emit('emails_removed', {'account_id': account.id, 'folder': folder, 'ids': removed_ids})
+
+        fs.uidvalidity = uidvalidity
+        fs.uidnext     = uidnext_srv
+        fs.last_sync   = datetime.utcnow()
+        db.session.commit()
+
+        prune_old_bodies(account.id)
+
+        return {'ok': True, 'new': new_count, 'flag_changes': flag_changes, 'removed': len(removed_rows)}
+
+    def _save_fetched(self, account: Account, folder: str, data: dict) -> int:
+        saved = 0
+        filters = list(EmailFilter.query.filter_by(account_id=account.id, enabled=True)
+                                        .order_by(EmailFilter.priority.asc()).all())
+        for uid, item in data.items():
+            raw = item.get(b'BODY[]') or item.get(b'RFC822')
+            if not raw:
+                continue
+            flags      = item.get(b'FLAGS', ())
+            is_read    = _has_flag(flags, '\\Seen')
+            is_starred = _has_flag(flags, '\\Flagged')
+            try:
+                email_obj, att_data = parse_email_from_raw(
+                    raw, uid, folder, account.id, is_read, resolve_thread_id)
+                email_obj.is_starred = is_starred
+                db.session.add(email_obj)
+                db.session.flush()
+                for a in att_data:
+                    att = Attachment(email_id=email_obj.id, filename=a['filename'],
+                                     content_type=a['content_type'], size=a['size'])
+                    try: att.save_to_disk(a['data'])
+                    except Exception: att.data = a['data']
+                    db.session.add(att)
+                db.session.commit()
+                self._apply_filters(email_obj, filters)
+                self._emit('new_email', {
+                    'account_id': account.id, 'folder': email_obj.folder,
+                    'email': email_obj.to_list_dict(),
+                })
+                saved += 1
+            except Exception as e:
+                log.warning(f'parse error account={account.id} uid={uid}: {e}')
+                try: db.session.rollback()
+                except Exception: pass
+        return saved
+
+    def _apply_flag_updates(self, account: Account, folder: str, flag_data: dict,
+                            existing_rows: dict) -> int:
+        updates = []
+        for uid, item in flag_data.items():
+            row = existing_rows.get(uid)
+            if not row:
+                continue
+            flags          = item.get(b'FLAGS', ())
+            server_read    = _has_flag(flags, '\\Seen')
+            server_starred = _has_flag(flags, '\\Flagged')
+            changed = {}
+            if row.is_read != server_read:
+                changed['is_read'] = server_read
+            if row.is_starred != server_starred:
+                changed['is_starred'] = server_starred
+            if changed:
+                updates.append((row.id, changed))
+        if not updates:
+            return 0
+        for email_id, changed in updates:
+            Email.query.filter_by(id=email_id).update(changed, synchronize_session=False)
+        db.session.commit()
+        self._emit('flags_updated', {
+            'account_id': account.id, 'folder': folder,
+            'updates': [{'id': eid, **changed} for eid, changed in updates],
+        })
+        return len(updates)
+
+    def fetch_full_body(self, email_obj: Email) -> bool:
+        """Poda de corpo (2.7): quando body_cached=false, busca o corpo
+        completo sob demanda e regrava no banco (Email volta a body_cached=true)."""
+        account = email_obj.account
+        try:
+            self._safe_exec(account, lambda c: c.select_folder(email_obj.folder, readonly=True))
+            data = self._safe_exec(account, lambda c: c.fetch([email_obj.uid], ['BODY.PEEK[]']))
+        except Exception as e:
+            log.warning(f'fetch_full_body error email_id={email_obj.id}: {e}')
+            return False
+        item = data.get(email_obj.uid)
+        if not item:
+            return False
+        raw = item.get(b'BODY[]') or item.get(b'RFC822')
+        if not raw:
+            return False
+        try:
+            parsed, att_data = parse_email_from_raw(
+                raw, email_obj.uid, email_obj.folder, account.id, email_obj.is_read, resolve_thread_id)
+        except Exception as e:
+            log.warning(f'fetch_full_body parse error email_id={email_obj.id}: {e}')
+            return False
+
+        for att in list(email_obj.attachments):
+            att.delete_from_disk()
+            db.session.delete(att)
+        email_obj.body_text      = parsed.body_text
+        email_obj.body_html      = parsed.body_html
+        email_obj.has_attachments = bool(att_data)
+        email_obj.body_cached    = True
+        db.session.flush()
+        for a in att_data:
+            att = Attachment(email_id=email_obj.id, filename=a['filename'],
+                             content_type=a['content_type'], size=a['size'])
+            try: att.save_to_disk(a['data'])
+            except Exception: att.data = a['data']
+            db.session.add(att)
+        db.session.commit()
+        return True
+
+    # ── Sync manual (botão "sincronizar") ────────────────────────────────────
 
     def sync_account(self, account_id: int) -> None:
-        """Sync manual completo de todas as pastas."""
         account = Account.query.get(account_id)
         if not account:
             return
@@ -205,158 +412,56 @@ class MailService:
         self._emit('sync_start', {'account_id': account_id, 'email': account.email})
         self._folder_cache.pop(account_id, None)
         try:
+            self.refresh_folder_roles(account)
+            folders = self.get_folders(account)
             total_new, total_flags = 0, 0
-            for folder in self._get_sync_folders(account):
-                new, flags = self._sync_folder(account, folder)
-                total_new  += new
-                total_flags += flags
+            for folder in folders:
+                result = self.sync_folder_incremental(account, folder)
+                if result.get('ok'):
+                    total_new   += result.get('new', 0)
+                    total_flags += result.get('flag_changes', 0)
             account.last_sync = datetime.utcnow()
             db.session.commit()
             self._emit('sync_done', {
                 'account_id': account_id, 'email': account.email,
                 'new': total_new, 'flag_changes': total_flags,
             })
+        except AuthCircuitOpen:
+            pass  # _on_auth_error já emitiu sync_error
         except Exception as e:
-            log.error(f'sync_account error: {e}')
-            pool.invalidate(account_id)
+            log.error(f'sync_account error {account.email}: {e}')
             self._emit('sync_error', {'account_id': account_id, 'error': str(e)})
 
-    def sync_account_non_inbox(self, account_id: int) -> None:
-        """Sync silencioso de todas as pastas exceto INBOX (coberta pelo IDLE)."""
+    # ── IMAP Search ───────────────────────────────────────────────────────────
+
+    def search_imap(self, account_id: int, folder: str, query: str) -> None:
         account = Account.query.get(account_id)
         if not account:
             return
+        self._emit('imap_search_start', {'account_id': account_id, 'query': query})
         try:
-            folders = [f for f in self._get_sync_folders(account)
-                       if not f.upper().startswith('INBOX') or '.' in f]
-            log.info(f'Sync outras pastas {account.email}: {folders}')
-            for folder in folders:
-                self._sync_folder(account, folder)
+            self._safe_exec(account, lambda c: c.select_folder(folder, readonly=True))
+            uids = self._safe_exec(account, lambda c: c.search(['TEXT', query]))
+            if not uids:
+                self._emit('imap_search_done', {'account_id': account_id, 'found': 0})
+                return
+            existing = {r[0] for r in db.session.query(Email.uid)
+                                                 .filter_by(account_id=account_id, folder=folder).all()}
+            new_uids = [u for u in uids if u not in existing]
+            saved = 0
+            for i in range(0, min(len(new_uids), 100), BATCH_SIZE):
+                batch = new_uids[i:i + BATCH_SIZE]
+                data = self._safe_exec(account, lambda c: c.fetch(batch, ['FLAGS', 'BODY.PEEK[]']))
+                saved += self._save_fetched(account, folder, data)
+            self._emit('imap_search_done', {
+                'account_id': account_id, 'found': len(uids),
+                'new': saved, 'folder': folder, 'query': query,
+            })
         except Exception as e:
-            log.warning(f'sync_account_non_inbox error {account.email}: {e}')
+            log.error(f'search_imap error {account.email}: {e}')
+            self._emit('imap_search_done', {'account_id': account_id, 'found': 0, 'error': str(e)})
 
-    def _sync_folder(self, account: Account, folder: str) -> tuple[int, int]:
-        """Sync de uma pasta. Retorna (new_count, flag_change_count)."""
-        new_count, flag_changes = 0, 0
-        try:
-            status, _ = self._safe_exec(account, lambda c: c.select(f'"{folder}"', readonly=True))
-            if status != 'OK':
-                return 0, 0
-
-            _, data = self._safe_exec(account, lambda c: c.uid('search', None, 'ALL'))
-            all_uids_server = {int(u) for u in (data[0].split() if data[0] else [])}
-
-            existing_rows = db.session.query(Email.uid, Email.id, Email.is_read) \
-                                      .filter_by(account_id=account.id, folder=folder).all()
-            existing_uid_map = {r.uid: {'id': r.id, 'is_read': r.is_read} for r in existing_rows}
-            existing_uids    = set(existing_uid_map)
-
-            # Remove fantasmas
-            ghost_ids = [existing_uid_map[u]['id'] for u in (existing_uids - all_uids_server)
-                         if u in existing_uid_map]
-            if ghost_ids:
-                log.info(f'_sync_folder {folder}: removendo {len(ghost_ids)} fantasmas')
-                db.session.query(Email).filter(Email.id.in_(ghost_ids)).delete(synchronize_session=False)
-                db.session.commit()
-
-            new_uids = sorted(all_uids_server - existing_uids)[-200:]
-            if new_uids:
-                uid_str = ','.join(str(u) for u in new_uids)
-                _, msg_data = self._safe_exec(
-                    account, lambda c: c.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])'))
-                batch, i = [], 0
-                while i < len(msg_data):
-                    item = msg_data[i]
-                    if not isinstance(item, tuple):
-                        i += 1; continue
-                    meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
-                    m    = re.search(r'UID (\d+)', meta)
-                    if not m:
-                        i += 1; continue
-                    uid     = int(m.group(1))
-                    is_read = '\\Seen' in meta
-                    try:
-                        email_obj, att_data = parse_email_from_raw(
-                            item[1], uid, folder, account.id, is_read, resolve_thread_id)
-                        batch.append((email_obj, att_data))
-                        new_count += 1
-                        if len(batch) >= BATCH_SIZE:
-                            self._flush_batch(account, batch); batch = []
-                    except Exception as e:
-                        log.warning(f'Parse error UID {uid}: {e}')
-                    i += 1
-                if batch:
-                    self._flush_batch(account, batch)
-
-            # Sync de flags dos 500 mais recentes
-            check_uids = sorted(existing_uids & all_uids_server)[-200:]
-            if check_uids:
-                uid_str = ','.join(str(u) for u in check_uids)
-                try:
-                    _, flag_data = self._safe_exec(
-                        account, lambda c: c.uid('fetch', uid_str, '(UID FLAGS)'))
-                    updates = []
-                    for item in flag_data:
-                        if not isinstance(item, (tuple, list)): continue
-                        meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
-                        m = re.search(r'UID (\d+)', meta)
-                        if not m: continue
-                        uid = int(m.group(1))
-                        server_read = '\\Seen' in meta
-                        row = existing_uid_map.get(uid)
-                        if row and row['is_read'] != server_read:
-                            updates.append((row['id'], server_read))
-                    if updates:
-                        for eid, is_read in updates:
-                            db.session.query(Email).filter_by(id=eid).update(
-                                {'is_read': is_read}, synchronize_session=False)
-                        db.session.commit()
-                        flag_changes = len(updates)
-                        self._emit('flags_updated', {
-                            'account_id': account.id, 'folder': folder,
-                            'updates': [{'id': eid, 'is_read': r} for eid, r in updates],
-                        })
-                except Exception as e:
-                    log.warning(f'Flag sync error {folder}: {e}')
-
-        except Exception as e:
-            log.error(f'_sync_folder {folder} error: {e}')
-            pool.invalidate(account.id)
-            try: db.session.rollback()
-            except Exception: pass
-
-        return new_count, flag_changes
-
-    def _flush_batch(self, account: Account, batch: list) -> None:
-        try:
-            for email_obj, _ in batch:
-                db.session.add(email_obj)
-            db.session.flush()
-            for email_obj, att_data in batch:
-                for a in att_data:
-                    att = Attachment(email_id=email_obj.id, filename=a['filename'],
-                                     content_type=a['content_type'], size=a['size'])
-                    try:
-                        att.save_to_disk(a['data'])
-                    except Exception as e:
-                        log.warning(f'Falha ao salvar anexo em disco: {e}')
-                        att.data = a['data']
-                    db.session.add(att)
-            db.session.commit()
-            filters = list(EmailFilter.query.filter_by(account_id=account.id, enabled=True)
-                                            .order_by(EmailFilter.priority.asc()).all())
-            for email_obj, _ in batch:
-                self._apply_filters(email_obj, filters)
-                self._emit('new_email', {
-                    'account_id': account.id,
-                    'folder':     email_obj.folder,
-                    'email':      email_obj.to_list_dict(),
-                })
-            enforce_email_limit(account.id)
-        except Exception as e:
-            log.error(f'_flush_batch error: {e}')
-            try: db.session.rollback()
-            except Exception: pass
+    # ── Filtros automáticos ───────────────────────────────────────────────────
 
     def _apply_filters(self, email_obj: Email, filters: list) -> None:
         for f in filters:
@@ -369,8 +474,6 @@ class MailService:
                 email_obj.is_starred = True; changed = True
             if f.action_delete:
                 self.delete_email(email_obj)
-                db.session.delete(email_obj)
-                db.session.commit()
                 return
             if f.action_move_to and email_obj.folder != f.action_move_to:
                 self.move_email(email_obj, f.action_move_to); changed = True
@@ -379,187 +482,132 @@ class MailService:
                 except Exception: db.session.rollback()
             break
 
-    # ── IMAP Search ───────────────────────────────────────────────────────────
+    # ── Ações servidor-primeiro (Fase 2.6) ───────────────────────────────────
+    # Todas devolvem {'ok': bool, ...}. O banco local só muda depois que o
+    # servidor confirma. EXPUNGE sempre com UID (uid_expunge, UIDPLUS) —
+    # nunca o EXPUNGE genérico que apagaria \Deleted de outro cliente (B7).
 
-    def search_imap(self, account_id: int, folder: str, query: str) -> None:
-        account = Account.query.get(account_id)
-        if not account:
-            return
-        self._emit('imap_search_start', {'account_id': account_id, 'query': query})
+    def mark_read_on_server(self, email_obj: Email, account: Account = None) -> bool:
+        acc = account or email_obj.account
         try:
-            status, _ = self._safe_exec(account, lambda c: c.select(f'"{folder}"', readonly=True))
-            if status != 'OK':
-                self._emit('imap_search_done', {'account_id': account_id, 'found': 0,
-                                                 'error': f'Pasta {folder} inacessível'})
-                return
-            criterion = f'TEXT "{query.replace(chr(34), "")}"'
-            _, data = self._safe_exec(account, lambda c: c.uid('search', None, criterion))
-            uids = data[0].split() if data[0] else []
-            if not uids:
-                self._emit('imap_search_done', {'account_id': account_id, 'found': 0})
-                return
-            existing = {row[0] for row in db.session.query(Email.uid)
-                                                     .filter_by(account_id=account_id, folder=folder).all()}
-            new_uids = [u for u in uids if int(u) not in existing]
-            if new_uids:
-                uid_str  = ','.join(u.decode() for u in new_uids[:100])
-                _, msg_data = self._safe_exec(
-                    account, lambda c: c.uid('fetch', uid_str, '(UID FLAGS BODY.PEEK[])'))
-                batch, i = [], 0
-                while i < len(msg_data):
-                    item = msg_data[i]
-                    if not isinstance(item, tuple): i += 1; continue
-                    meta = item[0].decode() if isinstance(item[0], bytes) else str(item[0])
-                    m    = re.search(r'UID (\d+)', meta)
-                    if not m: i += 1; continue
-                    uid     = int(m.group(1))
-                    is_read = '\\Seen' in meta
-                    try:
-                        email_obj, att_data = parse_email_from_raw(
-                            item[1], uid, folder, account_id, is_read, resolve_thread_id)
-                        batch.append((email_obj, att_data))
-                        if len(batch) >= BATCH_SIZE:
-                            self._flush_batch(account, batch); batch = []
-                    except Exception as e:
-                        log.warning(f'search_imap parse error UID {uid}: {e}')
-                    i += 1
-                if batch:
-                    self._flush_batch(account, batch)
-            self._emit('imap_search_done', {
-                'account_id': account_id, 'found': len(uids),
-                'new': len(new_uids), 'folder': folder, 'query': query,
-            })
-        except Exception as e:
-            log.error(f'search_imap error: {e}')
-            self._emit('imap_search_done', {'account_id': account_id, 'found': 0, 'error': str(e)})
-
-    # ── Flag operations ───────────────────────────────────────────────────────
-
-    def mark_read_on_server(self, email_obj: Email, account: Account = None) -> None:
-        try:
-            acc = account or email_obj.account
-            folder, uid = email_obj.folder, str(email_obj.uid)
-            def _mark(conn):
-                conn.select(f'"{folder}"')
-                conn.uid('store', uid, '+FLAGS', '\\Seen')
-            self._safe_exec(acc, _mark)
-        except Exception as e:
-            log.warning(f'mark_read error: {e}')
-
-    def mark_unread_on_server(self, email_obj: Email, account: Account = None) -> None:
-        try:
-            acc = account or email_obj.account
-            folder, uid = email_obj.folder, str(email_obj.uid)
-            def _mark(conn):
-                conn.select(f'"{folder}"')
-                conn.uid('store', uid, '-FLAGS', '\\Seen')
-            self._safe_exec(acc, _mark)
-        except Exception as e:
-            log.warning(f'mark_unread error: {e}')
-
-    def set_spam(self, email_obj: Email, mark_as_spam: bool, account=None) -> bool:
-        try:
-            acc    = account or email_obj.account
-            folder = email_obj.folder
-            uid    = str(email_obj.uid)
-            is_gmail = 'gmail' in (acc.imap_host or '').lower()
-
-            if mark_as_spam:
-                target = self.find_folder(acc, ['spam', 'junk'])
-            else:
-                target = 'INBOX'
-
-            if not target or folder.lower() == target.lower():
-                return bool(target)
-
-            def _move(conn):
-                conn.select(f'"{folder}"')
-                if is_gmail:
-                    try:
-                        conn.uid('move', uid, f'"{target}"')
-                        return
-                    except Exception:
-                        pass
-                conn.uid('copy', uid, f'"{target}"')
-                conn.uid('store', uid, '+FLAGS', '\\Deleted')
-                conn.expunge()
-
-            self._safe_exec(acc, _move)
-            email_obj.folder = target
-            db.session.commit()
+            self._safe_exec(acc, lambda c: (
+                c.select_folder(email_obj.folder, readonly=False),
+                c.add_flags([email_obj.uid], ['\\Seen']),
+            ))
             return True
         except Exception as e:
-            log.warning(f'set_spam error: {e}')
+            log.warning(f'mark_read_on_server error email_id={email_obj.id}: {e}')
             return False
 
-    def delete_email(self, email_obj: Email, account: Account = None) -> None:
-        acc    = account or email_obj.account
+    def mark_unread_on_server(self, email_obj: Email, account: Account = None) -> bool:
+        acc = account or email_obj.account
+        try:
+            self._safe_exec(acc, lambda c: (
+                c.select_folder(email_obj.folder, readonly=False),
+                c.remove_flags([email_obj.uid], ['\\Seen']),
+            ))
+            return True
+        except Exception as e:
+            log.warning(f'mark_unread_on_server error email_id={email_obj.id}: {e}')
+            return False
+
+    def mark_star_on_server(self, email_obj: Email, starred: bool, account: Account = None) -> bool:
+        acc = account or email_obj.account
+        flag_fn = 'add_flags' if starred else 'remove_flags'
+        try:
+            self._safe_exec(acc, lambda c: (
+                c.select_folder(email_obj.folder, readonly=False),
+                getattr(c, flag_fn)([email_obj.uid], ['\\Flagged']),
+            ))
+            return True
+        except Exception as e:
+            log.warning(f'mark_star_on_server error email_id={email_obj.id}: {e}')
+            return False
+
+    def _move_or_copy_delete(self, conn_exec, uid: int, source: str, target: str, caps: set) -> None:
+        """fn interna: seleciona source, move pra target (UID MOVE se
+        suportado, senão COPY + flag \\Deleted + UID EXPUNGE se UIDPLUS)."""
+        has_move    = 'MOVE' in caps
+        has_uidplus = 'UIDPLUS' in caps
+
+        def _op(c):
+            c.select_folder(source, readonly=False)
+            if has_move:
+                c.move([uid], target)
+                return
+            c.copy([uid], target)
+            c.add_flags([uid], ['\\Deleted'])
+            if has_uidplus:
+                c.uid_expunge([uid])
+            # sem UIDPLUS: mensagem fica duplicada (copiada + flagada no
+            # original) até algum cliente expurgar — nunca chamamos
+            # EXPUNGE genérico aqui (apagaria \Deleted de outro cliente).
+        conn_exec(_op)
+
+    def move_email(self, email_obj: Email, target_folder: str, account: Account = None) -> dict:
+        acc = account or email_obj.account
+        if not email_obj.uid:
+            return {'ok': False, 'error': 'uid ausente'}
+        caps = self._capabilities(acc)
+        try:
+            self._move_or_copy_delete(
+                lambda fn: self._safe_exec(acc, fn),
+                email_obj.uid, email_obj.folder, target_folder, caps)
+        except Exception as e:
+            log.warning(f'move_email error email_id={email_obj.id}: {e}')
+            return {'ok': False, 'error': str(e)}
+        email_obj.folder = target_folder
+        db.session.commit()
+        return {'ok': True}
+
+    def set_spam(self, email_obj: Email, mark_as_spam: bool, account: Account = None) -> dict:
+        acc = account or email_obj.account
+        target = self.role_folder(acc, 'junk') if mark_as_spam else (self.role_folder(acc, 'inbox') or 'INBOX')
+        if not target:
+            return {'ok': False, 'error': 'pasta de spam/inbox não encontrada'}
+        if email_obj.folder == target:
+            return {'ok': True, 'folder': email_obj.folder}
+        return self.move_email(email_obj, target, acc)
+
+    def delete_email(self, email_obj: Email, account: Account = None) -> dict:
+        acc = account or email_obj.account
+        uid = email_obj.uid
         folder = email_obj.folder
-        uid    = email_obj.uid
-
         if not uid:
-            log.warning(f'delete_email: uid é None para email id={email_obj.id}')
-            return
+            return {'ok': False, 'error': 'uid ausente'}
 
-        uid_str = str(uid)
-        is_gmail = 'gmail' in (acc.imap_host or '').lower()
-        log.info(f'delete_email: folder={folder} uid={uid_str} gmail={is_gmail}')
+        trash = self.role_folder(acc, 'trash')
+        caps  = self._capabilities(acc)
+        has_uidplus = 'UIDPLUS' in caps
 
         try:
-            trash = self.find_folder(acc, ['trash', 'deleted', 'lixeira'])
+            if trash and folder != trash:
+                self._move_or_copy_delete(lambda fn: self._safe_exec(acc, fn), uid, folder, trash, caps)
+                email_obj.folder = trash
+                db.session.commit()
+                return {'ok': True, 'permanent': False}
 
-            if is_gmail:
-                # Gmail: move para lixeira via MOVE ou COPY+DELETE
-                if trash and folder.lower() != trash.lower():
-                    def _gmail_trash(conn):
-                        conn.select(f'"{folder}"')
-                        # Tenta MOVE (extensão IMAP mais eficiente)
-                        try:
-                            conn.uid('move', uid_str, f'"{trash}"')
-                        except Exception:
-                            conn.uid('copy', uid_str, f'"{trash}"')
-                            conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
-                            conn.expunge()
-                    self._safe_exec(acc, _gmail_trash)
-                else:
-                    # Já está na lixeira — apaga de vez
-                    def _gmail_purge(conn):
-                        conn.select(f'"{folder}"')
-                        conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
-                        conn.expunge()
-                    self._safe_exec(acc, _gmail_purge)
-            else:
-                if trash and folder.lower() != trash.lower():
-                    def _move_trash(conn):
-                        conn.select(f'"{folder}"')
-                        conn.uid('copy', uid_str, f'"{trash}"')
-                        conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
-                        conn.expunge()
-                    self._safe_exec(acc, _move_trash)
-                else:
-                    def _delete(conn):
-                        conn.select(f'"{folder}"')
-                        conn.uid('store', uid_str, '+FLAGS', '\\Deleted')
-                        conn.expunge()
-                    self._safe_exec(acc, _delete)
-        except Exception as e:
-            log.error(f'delete_email error (folder={folder} uid={uid_str}): {e}', exc_info=True)
+            # já está na lixeira (ou não existe lixeira) — exclusão definitiva
+            def _purge(c):
+                c.select_folder(folder, readonly=False)
+                c.add_flags([uid], ['\\Deleted'])
+                if has_uidplus:
+                    c.uid_expunge([uid])
+            self._safe_exec(acc, _purge)
 
-    def move_email(self, email_obj: Email, target_folder: str, account: Account = None) -> None:
-        try:
-            acc    = account or email_obj.account
-            folder = email_obj.folder
-            uid    = str(email_obj.uid)
-            def _move(conn):
-                conn.select(f'"{folder}"')
-                conn.uid('copy', uid, f'"{target_folder}"')
-                conn.uid('store', uid, '+FLAGS', '\\Deleted')
-                conn.expunge()
-            self._safe_exec(acc, _move)
-            email_obj.folder = target_folder
+            if not has_uidplus:
+                return {'ok': True, 'permanent': False,
+                        'warning': 'Servidor sem UIDPLUS: mensagem marcada para exclusão, '
+                                   'mas não removida definitivamente ainda.'}
+
+            for att in email_obj.attachments:
+                att.delete_from_disk()
+            db.session.delete(email_obj)
             db.session.commit()
+            return {'ok': True, 'permanent': True}
         except Exception as e:
-            log.warning(f'move_email error: {e}')
+            log.error(f'delete_email error (folder={folder} uid={uid}): {e}')
+            return {'ok': False, 'error': str(e)}
 
     # ── Send ──────────────────────────────────────────────────────────────────
 
@@ -610,11 +658,10 @@ class MailService:
             s.quit()
 
             try:
-                sent_folder = self.find_folder(account, ['sent'])
+                sent_folder = self.role_folder(account, 'sent')
                 if sent_folder:
                     raw = msg.as_bytes()
-                    self._safe_exec(account,
-                        lambda c: c.append(f'"{sent_folder}"', '\\Seen', None, raw))
+                    self._safe_exec(account, lambda c: c.append(sent_folder, raw, flags=['\\Seen']))
             except Exception as e:
                 log.warning(f'Could not save to Sent: {e}')
 
@@ -622,3 +669,40 @@ class MailService:
         except Exception as e:
             log.error(f'send_email error: {e}')
             return {'ok': False, 'error': str(e)}
+
+
+# ── Poda de armazenamento (Fase 2.7, resolve B2) ─────────────────────────────
+
+def prune_old_bodies(account_id: int) -> int:
+    """Substitui enforce_email_limit (que apagava linhas → re-download
+    infinito). Poda corpo/anexos de mensagens além do limite configurado ou
+    mais antigas que a retenção, marcando body_cached=false. O cabeçalho
+    continua no banco e a mensagem continua na lista; o corpo volta sob
+    demanda (MailService.fetch_full_body)."""
+    cutoff = datetime.utcnow() - timedelta(days=BODY_RETENTION_DAYS)
+    total = db.session.query(db.func.count(Email.id)).filter_by(account_id=account_id).scalar() or 0
+
+    to_prune = {}
+    if total > MAX_BODIES_PER_ACCOUNT:
+        over_limit = (Email.query.filter_by(account_id=account_id, body_cached=True)
+                                 .order_by(Email.date.asc())
+                                 .limit(total - MAX_BODIES_PER_ACCOUNT).all())
+        for e in over_limit:
+            to_prune[e.id] = e
+
+    old_ones = (Email.query.filter_by(account_id=account_id, body_cached=True)
+                           .filter(Email.date < cutoff).all())
+    for e in old_ones:
+        to_prune[e.id] = e
+
+    for email_obj in to_prune.values():
+        for att in list(email_obj.attachments):
+            att.delete_from_disk()
+            db.session.delete(att)
+        email_obj.body_text   = ''
+        email_obj.body_html   = ''
+        email_obj.body_cached = False
+
+    if to_prune:
+        db.session.commit()
+    return len(to_prune)

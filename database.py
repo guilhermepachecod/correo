@@ -17,8 +17,14 @@ except Exception as e:
     raise RuntimeError(f'CORREO_FERNET_KEY inválida (precisa ser uma chave Fernet base64): {e}')
 
 ATTACHMENTS_DIR        = os.environ.get('ATTACHMENTS_DIR', '/app/database/attachments')
-MAX_EMAILS_PER_ACCOUNT = int(os.environ.get('MAX_EMAILS_PER_ACCOUNT', 2000))
 MAX_ACCOUNTS           = int(os.environ.get('MAX_ACCOUNTS', 20))
+
+# Fase 2.7: limite de CORPOS em cache, não de linhas (ver prune_old_bodies em
+# services/mail_service.py). MAX_EMAILS_PER_ACCOUNT é o nome antigo, mantido
+# como fallback pra não quebrar quem já tinha isso no .env.
+MAX_BODIES_PER_ACCOUNT = int(os.environ.get(
+    'CORREO_MAX_BODIES_PER_ACCOUNT', os.environ.get('MAX_EMAILS_PER_ACCOUNT', 2000)))
+BODY_RETENTION_DAYS    = int(os.environ.get('CORREO_BODY_RETENTION_DAYS', 180))
 
 
 class Account(db.Model):
@@ -243,19 +249,6 @@ class AppSettings(db.Model):
     @staticmethod
     def get_all() -> dict:
         return {row.key: row.value for row in AppSettings.query.all()}
-
-
-def enforce_email_limit(account_id: int) -> int:
-    total = db.session.query(db.func.count(Email.id)).filter_by(account_id=account_id).scalar() or 0
-    if total <= MAX_EMAILS_PER_ACCOUNT:
-        return 0
-    old_emails = (db.session.query(Email).filter_by(account_id=account_id)
-                             .order_by(Email.date.asc()).limit(total - MAX_EMAILS_PER_ACCOUNT).all())
-    for email in old_emails:
-        for att in email.attachments: att.delete_from_disk()
-        db.session.delete(email)
-    db.session.commit()
-    return len(old_emails)
 
 
 def _migration_001_legacy(conn) -> None:
