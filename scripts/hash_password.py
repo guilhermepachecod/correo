@@ -16,4 +16,13 @@ if __name__ == '__main__':
     if len(pw1) < 8:
         print('Use uma senha com pelo menos 8 caracteres.')
         raise SystemExit(1)
-    print(f'CORREO_PASSWORD_HASH={generate_password_hash(pw1, method="scrypt")}')
+    hash_value = generate_password_hash(pw1, method='scrypt')
+    print(f'CORREO_PASSWORD_HASH={hash_value}')
+    if '$' in hash_value:
+        escaped = hash_value.replace('$', '$$')
+        print(
+            '\nATENÇÃO: o docker-compose faz interpolação de variáveis dentro do .env — '
+            'todo "$" literal precisa ser escrito como "$$", senão o hash é corrompido '
+            'ao subir o container. Cole esta linha no .env (não a de cima):\n'
+            f'CORREO_PASSWORD_HASH={escaped}'
+        )
