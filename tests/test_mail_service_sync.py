@@ -142,6 +142,53 @@ def test_message_removed_on_server_is_removed_locally_not_just_flagged(monkeypat
         assert remaining == {1, 3}
 
 
+def test_flags_check_is_batched_for_large_folders(monkeypatch):
+    """Mesmo bug do bulk_action, só que no poll periódico: uma pasta com
+    muitas mensagens (ex.: Lixeira com milhares) não pode mandar um único
+    FETCH com todos os UIDs — tem que sair em lotes de FLAGS_BATCH_SIZE.
+    Pré-popula o banco direto (sem passar pelo fetch+parse de cada
+    mensagem) pra não deixar o teste lento à toa — o que importa aqui é
+    só a fase de checagem de flags."""
+    with app.app_context():
+        db.session.query(Email).delete()
+        db.session.query(FolderState).delete()
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('sync5@example.com')
+
+        uidvalidity, n = 111, 220  # mais que FLAGS_BATCH_SIZE (200)
+        db.session.add(FolderState(account_id=acc.id, folder='INBOX',
+                                   uidvalidity=uidvalidity, uidnext=1000))
+        db.session.add_all([
+            Email(account_id=acc.id, folder='INBOX', uid=uid, subject=f'm{uid}',
+                 from_addr='a@b.com', is_read=True)
+            for uid in range(1, n + 1)
+        ])
+        db.session.commit()
+
+        fake = FakeClient(uidvalidity=uidvalidity)
+        fake.all_uids = set(range(1, n + 1))  # tudo já existe localmente — sem novo fetch de corpo
+        ms = _ms_with_fake(monkeypatch, fake)
+
+        fetch_calls = []
+        orig_fetch = fake.fetch
+        def _tracking_fetch(uids, data):
+            if data == ['FLAGS']:
+                fetch_calls.append(len(uids))
+            return orig_fetch(uids, data)
+        fake.fetch = _tracking_fetch
+
+        fake.flags_by_uid[1] = (b'\\Seen',)  # garante pelo menos uma mudança real
+        result = ms.sync_folder_incremental(acc, 'INBOX')
+
+        assert result['ok'] is True
+        assert result['new'] == 0  # nada novo — só a checagem de flags importa aqui
+        assert fetch_calls  # chamou FETCH (FLAGS) pelo menos uma vez
+        assert all(c <= 200 for c in fetch_calls)
+        assert sum(fetch_calls) == n  # todos os UIDs existentes, cobertos em lotes
+        assert len(fetch_calls) == 2  # 200 + 20 — confirma mais de um lote
+
+
 def test_uidvalidity_change_reindexes_folder(monkeypatch):
     """Resolve B6: UIDVALIDITY mudou → cache local da pasta é refeito sem duplicar."""
     with app.app_context():
