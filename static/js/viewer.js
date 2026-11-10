@@ -158,14 +158,28 @@ function _renderEmailBody() {
 
   if (state.emailViewMode === 'html' && email.body_html) {
     bodyHtml.style.display = 'block'; bodyText.style.display = 'none';
-    let clean = email.body_html
-      .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '');
+    // body_html já vem sanitizado do servidor (nh3) — aqui só aplicamos o
+    // bloqueio de imagens remotas antes de renderizar num iframe isolado
+    // (sandbox sem allow-scripts/allow-same-origin: nada do e-mail executa).
+    let html = email.body_html;
     if (!state.emailShowImages) {
-      clean = clean.replace(/<img([^>]*?)\ssrc=(["'])(?!data:)([^"']+)\2/gi,
+      html = html.replace(/<img([^>]*?)\ssrc=(["'])(?!data:)([^"']+)\2/gi,
         (m, attrs, q, src) => `<img${attrs} data-src="${src}" src="" style="display:none" title="🖼 Imagem bloqueada">`);
     }
-    bodyHtml.innerHTML = clean;
+    const srcdoc = `<!DOCTYPE html><html><head><meta charset="UTF-8"><base target="_blank">
+      <style>body{font-family:sans-serif;color:#111;background:#fff;margin:0;padding:12px;
+      word-wrap:break-word;overflow-wrap:break-word}img{max-width:100%}</style></head>
+      <body>${html}</body></html>`;
+    let iframe = document.getElementById('ev-body-iframe');
+    if (!iframe) {
+      iframe = document.createElement('iframe');
+      iframe.id = 'ev-body-iframe';
+      iframe.setAttribute('sandbox', 'allow-popups');
+      iframe.style.cssText = 'width:100%;border:0;display:block;height:70vh;background:#fff;border-radius:var(--radius);';
+      bodyHtml.innerHTML = '';
+      bodyHtml.appendChild(iframe);
+    }
+    iframe.srcdoc = srcdoc;
   } else {
     bodyHtml.style.display = 'none'; bodyText.style.display = 'block';
     bodyText.textContent = email.body_text || '';

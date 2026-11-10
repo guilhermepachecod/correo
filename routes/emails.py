@@ -8,12 +8,19 @@ import threading
 from flask import Blueprint, request, jsonify, send_file, abort, current_app
 
 from database import db, Account, Email, Attachment, enforce_email_limit
+from services.sanitize import sanitize_email_html
 
 bp = Blueprint('emails', __name__)
 
 def _ms():
     from extensions import mail_service
     return mail_service
+
+
+def _sanitized_dict(email: Email) -> dict:
+    d = email.to_dict()
+    d['body_html'] = sanitize_email_html(d.get('body_html') or '')
+    return d
 
 
 # ── Listagem ──────────────────────────────────────────────────────────────────
@@ -56,7 +63,7 @@ def get_email(email_id):
         email.is_read = True
         db.session.commit()
         _ms().mark_read_on_server(email, account)
-    return jsonify(email.to_dict())
+    return jsonify(_sanitized_dict(email))
 
 
 # ── Flags ─────────────────────────────────────────────────────────────────────
@@ -274,7 +281,7 @@ def get_thread(thread_id):
     if account_id:
         q = q.filter_by(account_id=account_id)
     emails = q.order_by(Email.date.asc()).all()
-    return jsonify([e.to_dict() for e in emails])
+    return jsonify([_sanitized_dict(e) for e in emails])
 
 
 # ── Attachments ───────────────────────────────────────────────────────────────
