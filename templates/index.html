@@ -9,6 +9,7 @@
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="/static/style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="/static/js/auth-client.js"></script>
 </head>
 <body>
 <div id="app">
@@ -25,6 +26,7 @@
     <div id="sidebar-footer">
       <div class="sidebar-action" onclick="openAccountModal()">⚙ Gerenciar contas</div>
       <div class="sidebar-action" onclick="openFiltersModal()">🔧 Filtros / Regras</div>
+      <div class="sidebar-action" onclick="logout()">🚪 Sair</div>
       <div class="sidebar-divider"></div>
       <div class="sidebar-setting">
         <span class="sidebar-setting-label">Tema</span>

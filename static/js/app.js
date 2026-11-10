@@ -1,5 +1,12 @@
 // app.js — orquestrador: init, tema, layout, resize, autosync, notificações, atalhos
 
+// ── Sessão ────────────────────────────────────────────────────────────────────
+
+async function logout() {
+  try { await fetch('/api/logout', { method: 'POST' }); } catch (e) {}
+  window.location.href = '/login';
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
