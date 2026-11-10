@@ -33,7 +33,9 @@ def folder_counts():
     pasta conhecida via folder_state (Fase 2.3), mesmo com 0 e-mails em
     cache, pra pasta não 'desaparecer' da sidebar quando o cache local
     esvazia (ex.: lixeira limpa) — era isso que causava Lixeira
-    aparecendo/sumindo a cada sync."""
+    aparecendo/sumindo a cada sync. Também devolve o role de cada pasta
+    (Fase 2.3) — o frontend usa isso pra calcular o badge de 'novas
+    mensagens' da conta sem contar Lixeira/Spam/Enviados."""
     account_id = request.args.get('account_id', type=int)
     q = db.session.query(
         Email.folder,
@@ -44,7 +46,7 @@ def folder_counts():
         q = q.filter(Email.account_id == account_id)
     q = q.group_by(Email.folder)
     result = {
-        row.folder: {'total': row.total, 'unread': int(row.unread or 0)}
+        row.folder: {'total': row.total, 'unread': int(row.unread or 0), 'role': None}
         for row in q.all()
     }
 
@@ -52,7 +54,10 @@ def folder_counts():
     if account_id:
         fs_q = fs_q.filter_by(account_id=account_id)
     for fs in fs_q.all():
-        result.setdefault(fs.folder, {'total': 0, 'unread': 0})
+        if fs.folder in result:
+            result[fs.folder]['role'] = fs.role
+        else:
+            result[fs.folder] = {'total': 0, 'unread': 0, 'role': fs.role}
 
     return jsonify(result)
 

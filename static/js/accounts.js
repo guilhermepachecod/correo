@@ -128,10 +128,20 @@ async function refreshViewCounts() {
 // ── Árvore de contas ──────────────────────────────────────────────────────────
 
 function getAccountUnread(accountId) {
+  // Badge de 'novas mensagens' da conta = só a INBOX (role=inbox, Fase 2.3).
+  // Antes somava o unread de TODAS as pastas exceto sent/draft — contava
+  // mensagem não lida na Lixeira/Spam como se fosse novidade.
   const data = folderCountsData[accountId] || {};
-  return Object.entries(data).reduce((s, [folder, c]) => {
+  const entries = Object.entries(data);
+  if (entries.some(([, c]) => c.role)) {
+    return entries.reduce((s, [, c]) => s + (c.role === 'inbox' ? (c.unread || 0) : 0), 0);
+  }
+  // Fallback por nome, só usado se a conta ainda não tem role conhecido
+  // (refresh_folder_roles nunca rodou) — exclui tudo que não é INBOX.
+  const EXCLUDE = ['sent', 'draft', 'trash', 'lixeira', 'deleted', 'spam', 'junk', 'archive'];
+  return entries.reduce((s, [folder, c]) => {
     const f = folder.toLowerCase();
-    if (['sent', 'draft'].some(kw => f.includes(kw))) return s;
+    if (EXCLUDE.some(kw => f.includes(kw))) return s;
     return s + (c.unread || 0);
   }, 0);
 }

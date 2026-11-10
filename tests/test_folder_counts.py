@@ -46,8 +46,8 @@ def test_empty_known_folder_still_appears_with_zero_count():
         data = r.get_json()
 
         assert 'INBOX.Trash' in data
-        assert data['INBOX.Trash'] == {'total': 0, 'unread': 0}
-        assert data['INBOX'] == {'total': 1, 'unread': 1}
+        assert data['INBOX.Trash'] == {'total': 0, 'unread': 0, 'role': 'trash'}
+        assert data['INBOX'] == {'total': 1, 'unread': 1, 'role': 'inbox'}
 
 
 def test_unknown_folder_without_folder_state_is_not_invented():
@@ -60,3 +60,22 @@ def test_unknown_folder_without_folder_state_is_not_invented():
         data = r.get_json()
 
         assert 'INBOX.Spam' not in data  # nunca existiu em folder_state nem em emails
+
+
+def test_unread_message_in_trash_is_tagged_with_trash_role():
+    """Regressão do bug: mensagem não lida na Lixeira entrava no badge de
+    'novas mensagens' da conta porque o frontend só excluía sent/draft.
+    O role=trash é o que permite o frontend (getAccountUnread) excluir
+    certo agora, em vez de adivinhar pelo nome da pasta."""
+    with app.app_context():
+        acc = _seed()
+        db.session.add(Email(account_id=acc.id, folder='INBOX.Trash', uid=2, subject='lixo',
+                             from_addr='a@b.com', is_read=False))
+        db.session.commit()
+        client = app.test_client()
+        _login(client)
+
+        r = client.get(f'/api/folders/counts?account_id={acc.id}')
+        data = r.get_json()
+
+        assert data['INBOX.Trash'] == {'total': 1, 'unread': 1, 'role': 'trash'}
