@@ -58,6 +58,21 @@ Requisitos:
 - Visão padrão ao abrir o app: **Não lidos** (configurável em Configurações).
 - Atalho de teclado: `g a` (todos), `g u` (não lidos), `g s` (estrela).
 
+> **Entregue** (sidebar, `selectUnifiedView`, marcador de conta, badges via
+> `/api/views/counts`) — ver commits `fase5.1: ...`. Ressalvas, por
+> decisão explícita do usuário ou por ainda não ter sido feito:
+> - **"Não lidos" remove a mensagem da lista no momento em que é marcada
+>   como lida** (não "continua até sair da visão") — mudança pedida pelo
+>   usuário em relação ao spec original.
+> - Cor do marcador é gerada por hash do e-mail (`_accountColor` em
+>   `emails.js`), sem UI de configuração por conta — ainda não feito.
+> - Ações em lote na visão unificada ainda não testadas especificamente
+>   (a lógica de agrupar por conta/pasta já existe desde a Fase 2.6 e
+>   deveria funcionar, mas não tem teste dedicado pra isso).
+> - Visão padrão ainda é a última pasta/conta selecionada, não "Não
+>   lidos" — não mudei o comportamento de abertura do app.
+> - Atalhos de teclado `g a`/`g u`/`g s` não implementados.
+
 ---
 
 ## 2. Compose em tela grande
