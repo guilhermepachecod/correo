@@ -30,6 +30,9 @@ const state = {
   authFailed:         new Set(),
   currentView:        null,   // null = navegando por conta/pasta; senão 'all'|'unread'|'starred'|'sent'|'trash'
   viewCounts:         {},
+  // Visão "Não lidos": id da mensagem já lida que continua na lista só
+  // porque ainda é a que está aberta — sai assim que outra for aberta.
+  pendingRemoveFromUnread: null,
 };
 
 const MIN_SYNC_GAP_MS = 5 * 60 * 1000;

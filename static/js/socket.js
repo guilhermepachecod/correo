@@ -70,9 +70,17 @@ socket.on('flags_updated', d => {
     for (const upd of (d.updates || [])) {
       const email = state.emails.find(e => e.id === upd.id);
       if (!email) continue;
-      // Visão "Não lidos": se outro cliente marcou como lido, some da lista.
+      // Visão "Não lidos": se outro cliente marcou como lido, some da lista
+      // — a não ser que seja a mensagem aberta aqui agora, que só sai
+      // quando o usuário trocar de mensagem (mesma regra de openEmail).
       if (state.currentView === 'unread' && 'is_read' in upd && upd.is_read) {
-        _dropFromList(upd.id);
+        if (upd.id === state.selectedEmailId) {
+          email.is_read = true;
+          state.pendingRemoveFromUnread = upd.id;
+          _patchEmailItem(upd.id, { is_read: true });
+        } else {
+          _dropFromList(upd.id);
+        }
         changed = true;
         continue;
       }

@@ -91,6 +91,7 @@ function selectUnifiedView(view) {
   state.selectedFolder      = null;
   state.selectedFolderReals = null;
   state.selectedEmailId     = null;
+  state.pendingRemoveFromUnread = null;
   state.selectedIds.clear();
   state.currentPage         = 1;
   state.searchQuery         = '';
@@ -265,6 +266,7 @@ function toggleAccountCollapse(accId, node) {
 
 function selectFolder(accountId, folderKey, realFolders) {
   state.currentView         = null;
+  state.pendingRemoveFromUnread = null;
   state.selectedAccountId   = accountId;
   state.selectedFolder      = folderKey;
   state.selectedFolderReals = realFolders;

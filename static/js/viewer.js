@@ -3,6 +3,15 @@
 // ── Abrir e-mail ──────────────────────────────────────────────────────────────
 
 async function openEmail(id) {
+  // Na visão "Não lidos": a mensagem que estava aberta antes (já lida)
+  // só sai da lista quando o usuário troca pra outra mensagem — nunca
+  // enquanto ainda é a que está aberta no painel.
+  if (state.currentView === 'unread' && state.pendingRemoveFromUnread
+      && state.pendingRemoveFromUnread !== id) {
+    _dropFromList(state.pendingRemoveFromUnread);
+  }
+  state.pendingRemoveFromUnread = null;
+
   state.selectedEmailId = id;
   state.threadOpen      = false;
   document.querySelectorAll('.email-item').forEach(el =>
@@ -11,9 +20,9 @@ async function openEmail(id) {
   // Marca como lido na lista imediatamente
   const le = state.emails.find(e => e.id === id);
   if (le) { le.is_read = true; _patchEmailItem(id, { is_read: true }); }
-  // Na visão "Não lidos", ler uma mensagem a remove da lista (ela continua
-  // aberta no painel de leitura, só sai da lista à esquerda)
-  if (state.currentView === 'unread') _dropFromList(id);
+  // Fica marcada pra sair da lista só quando outra mensagem for aberta
+  // (ver acima) — nunca enquanto ainda está sendo lida.
+  if (state.currentView === 'unread') state.pendingRemoveFromUnread = id;
 
   // Mostra painel imediatamente com dados da lista (que já temos)
   document.getElementById('reading-empty').style.display = 'none';

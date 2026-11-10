@@ -62,9 +62,12 @@ Requisitos:
 > `/api/views/counts`) — ver commits `fase5.1: ...`. Atualização: a
 > rodada seguinte (commits `fase5.3: ...`) fechou a maior parte das
 > ressalvas abaixo:
-> - **"Não lidos" remove a mensagem da lista no momento em que é marcada
->   como lida** (não "continua até sair da visão") — mudança pedida pelo
->   usuário em relação ao spec original. Continua assim.
+> - ✅ **"Não lidos" volta ao comportamento do spec original**: a mensagem
+>   aberta é marcada como lida mas **continua visível na lista** enquanto
+>   for a mensagem aberta; só sai quando o usuário abre outra (`state.
+>   pendingRemoveFromUnread` em viewer.js/socket.js). A primeira versão
+>   desta rodada removia na hora — testado pelo usuário e corrigido de
+>   volta pro spec (ver commit `fix: ...` depois do `fase5.1`).
 > - ✅ Cor do marcador agora é configurável por conta (`Account.marker_color`,
 >   picker na tela "Gerenciar contas") — sem cor definida, cai no hash do
 >   e-mail (`_accountColor` em `emails.js`) como antes.
