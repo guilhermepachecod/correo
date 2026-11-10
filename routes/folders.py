@@ -15,8 +15,13 @@ def _ms():
 
 @bp.get('/api/accounts/<int:account_id>/folders')
 def get_folders(account_id):
+    """Lista as pastas IMAP da conta com o role detectado (SPECIAL-USE ou
+    nome — ver services/special_folders.py). Não consumido pelo frontend
+    hoje (static/js/filters.js usa /api/folders/counts, que é local)."""
     account = Account.query.get_or_404(account_id)
-    return jsonify(_ms().get_folders(account))
+    roles = _ms().refresh_folder_roles(account)
+    folders = _ms().get_folders(account)
+    return jsonify([{'name': f, 'role': roles.get(f)} for f in folders])
 
 
 @bp.get('/api/folders/counts')

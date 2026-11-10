@@ -14,14 +14,28 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
-from database import db, Email, Attachment, EmailFilter, Account, \
+from database import db, Email, Attachment, EmailFilter, Account, FolderState, \
     enforce_email_limit, resolve_thread_id
 from services.imap_pool import pool
 from services.email_parser import parse_email_from_raw
+from services.special_folders import detect_role
 
 log = logging.getLogger(__name__)
 
 BATCH_SIZE = 50
+
+_LIST_LINE_RE = re.compile(r'^\((?P<flags>[^)]*)\)\s+"(?P<delim>[^"]*)"\s+(?P<name>.*)$')
+
+
+def _parse_list_line(raw: str):
+    """Faz o parse de uma linha da resposta de LIST do IMAP:
+    '(<flags>) "<delimitador>" <nome>' → ([flags], nome). None se não casar."""
+    m = _LIST_LINE_RE.match(raw.strip())
+    if not m:
+        return None
+    flags = m.group('flags').split()
+    name = m.group('name').strip().strip('"')
+    return flags, name
 
 
 class MailService:
@@ -143,6 +157,42 @@ class MailService:
             if f not in result:
                 result.append(f)
         return result[:10]
+
+    def refresh_folder_roles(self, account: Account) -> dict[str, str | None]:
+        """Fase 2.3: detecta o role (inbox/sent/trash/junk/drafts/archive)
+        de cada pasta via SPECIAL-USE (RFC 6154) ou, na falta, pelo nome, e
+        grava em FolderState. Usa a mesma conexão (imap_pool) e o mesmo
+        comando LIST que get_folders() já usa — não muda nada do algoritmo
+        de sync existente, só preenche FolderState.role para quem for
+        consumir isso (visões unificadas, ações servidor-primeiro — ambas
+        fora do escopo desta função)."""
+        result: dict[str, str | None] = {}
+        try:
+            raw_list = self._safe_exec(account, lambda c: c.list()[1])
+        except Exception as e:
+            log.warning(f'refresh_folder_roles error {account.email}: {e}')
+            return result
+
+        existing = {fs.folder: fs for fs in
+                    FolderState.query.filter_by(account_id=account.id).all()}
+        for item in raw_list:
+            if not isinstance(item, bytes):
+                continue
+            parsed = _parse_list_line(item.decode('utf-8', errors='replace'))
+            if not parsed:
+                continue
+            flags, name = parsed
+            role = detect_role(name, flags)
+            result[name] = role
+            fs = existing.get(name)
+            if fs:
+                fs.role = role
+            else:
+                fs = FolderState(account_id=account.id, folder=name, role=role)
+                db.session.add(fs)
+                existing[name] = fs
+        db.session.commit()
+        return result
 
     # ── Sync ─────────────────────────────────────────────────────────────────
 
