@@ -213,6 +213,16 @@ def send_email():
 
 # ── Bulk (Fase 2.6 — sempre em lote por conta/pasta, nunca EXPUNGE genérico) ──
 
+BULK_IMAP_BATCH = 200  # UIDs por comando IMAP — evita linha de comando longa
+                       # demais pro servidor (ex.: "apagar todos" com milhares
+                       # de mensagens na Lixeira travava silenciosamente)
+
+
+def _chunks(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
 @bp.post('/api/emails/bulk')
 def bulk_action():
     data       = request.json
@@ -234,7 +244,8 @@ def bulk_action():
     if not emails:
         return jsonify({'ok': True, 'count': 0})
 
-    # Agrupa por (account_id, folder) — um único comando IMAP por grupo
+    # Agrupa por (account_id, folder) — mas o comando IMAP em si sai em
+    # lotes de BULK_IMAP_BATCH UIDs (ver _chunks), nunca tudo de uma vez
     groups = defaultdict(list)
     for email in emails:
         groups[(email.account_id, email.folder)].append(email)
@@ -242,84 +253,94 @@ def bulk_action():
     count, errors = 0, []
 
     for (acc_id, fldr), group in groups.items():
-        acc  = group[0].account
-        uids = [e.uid for e in group if e.uid]
-        if not uids:
+        acc = group[0].account
+        by_uid = {e.uid: e for e in group if e.uid}
+        if not by_uid:
             continue
-        ids_in_group = [e.id for e in group]
 
         try:
             caps = ms._capabilities(acc)
-
-            if action == 'mark_read':
-                ms._safe_exec(acc, lambda c: (c.select_folder(fldr, readonly=False), c.add_flags(uids, ['\\Seen'])))
-                Email.query.filter(Email.id.in_(ids_in_group)).update({'is_read': True}, synchronize_session=False)
-                db.session.commit()
-                count += len(group)
-
-            elif action == 'mark_unread':
-                ms._safe_exec(acc, lambda c: (c.select_folder(fldr, readonly=False), c.remove_flags(uids, ['\\Seen'])))
-                Email.query.filter(Email.id.in_(ids_in_group)).update({'is_read': False}, synchronize_session=False)
-                db.session.commit()
-                count += len(group)
-
-            elif action == 'delete':
-                trash = ms.role_folder(acc, 'trash')
-                has_move, has_uidplus = 'MOVE' in caps, 'UIDPLUS' in caps
-                if trash and fldr != trash:
-                    def _op(c, _uids=uids, _trash=trash):
-                        c.select_folder(fldr, readonly=False)
-                        if has_move:
-                            c.move(_uids, _trash)
-                        else:
-                            c.copy(_uids, _trash)
-                            c.add_flags(_uids, ['\\Deleted'])
-                            if has_uidplus:
-                                c.uid_expunge(_uids)
-                    ms._safe_exec(acc, _op)
-                    Email.query.filter(Email.id.in_(ids_in_group)).update({'folder': trash}, synchronize_session=False)
-                    db.session.commit()
-                    count += len(group)
-                else:
-                    def _op(c, _uids=uids):
-                        c.select_folder(fldr, readonly=False)
-                        c.add_flags(_uids, ['\\Deleted'])
-                        if has_uidplus:
-                            c.uid_expunge(_uids)
-                    ms._safe_exec(acc, _op)
-                    if has_uidplus:
-                        for e in group:
-                            for att in e.attachments:
-                                att.delete_from_disk()
-                        Email.query.filter(Email.id.in_(ids_in_group)).delete(synchronize_session=False)
-                        db.session.commit()
-                        count += len(group)
-                    # sem UIDPLUS: fica só flagado \Deleted no servidor, sem
-                    # remover localmente (nunca EXPUNGE genérico — bug B7)
-
-            elif action in ('mark_spam', 'mark_not_spam'):
-                target = ms.role_folder(acc, 'junk') if action == 'mark_spam' else (ms.role_folder(acc, 'inbox') or 'INBOX')
-                if target and fldr != target:
-                    has_move, has_uidplus = 'MOVE' in caps, 'UIDPLUS' in caps
-                    def _op(c, _uids=uids, _target=target):
-                        c.select_folder(fldr, readonly=False)
-                        if has_move:
-                            c.move(_uids, _target)
-                        else:
-                            c.copy(_uids, _target)
-                            c.add_flags(_uids, ['\\Deleted'])
-                            if has_uidplus:
-                                c.uid_expunge(_uids)
-                    ms._safe_exec(acc, _op)
-                    Email.query.filter(Email.id.in_(ids_in_group)).update({'folder': target}, synchronize_session=False)
-                    db.session.commit()
-                    count += len(group)
-
         except Exception as e:
-            log.warning(f'bulk {action} error (acc={acc_id} folder={fldr}): {e}')
-            errors.append(f'{acc.email}/{fldr}: {e}')
-            try: db.session.rollback()
-            except Exception: pass
+            log.warning(f'bulk {action} capabilities error (acc={acc_id}): {e}')
+            errors.append(f'{acc.email}: {e}')
+            continue
+        has_move, has_uidplus = 'MOVE' in caps, 'UIDPLUS' in caps
+
+        trash  = ms.role_folder(acc, 'trash')  if action == 'delete' else None
+        target = (ms.role_folder(acc, 'junk') if action == 'mark_spam'
+                  else ms.role_folder(acc, 'inbox') or 'INBOX') if action in ('mark_spam', 'mark_not_spam') else None
+
+        for batch_uids in _chunks(list(by_uid.keys()), BULK_IMAP_BATCH):
+            batch_emails = [by_uid[u] for u in batch_uids]
+            batch_ids    = [e.id for e in batch_emails]
+            try:
+                if action == 'mark_read':
+                    ms._safe_exec(acc, lambda c, _u=batch_uids: (c.select_folder(fldr, readonly=False), c.add_flags(_u, ['\\Seen'])))
+                    Email.query.filter(Email.id.in_(batch_ids)).update({'is_read': True}, synchronize_session=False)
+                    db.session.commit()
+                    count += len(batch_emails)
+
+                elif action == 'mark_unread':
+                    ms._safe_exec(acc, lambda c, _u=batch_uids: (c.select_folder(fldr, readonly=False), c.remove_flags(_u, ['\\Seen'])))
+                    Email.query.filter(Email.id.in_(batch_ids)).update({'is_read': False}, synchronize_session=False)
+                    db.session.commit()
+                    count += len(batch_emails)
+
+                elif action == 'delete':
+                    if trash and fldr != trash:
+                        def _op(c, _u=batch_uids, _trash=trash):
+                            c.select_folder(fldr, readonly=False)
+                            if has_move:
+                                c.move(_u, _trash)
+                            else:
+                                c.copy(_u, _trash)
+                                c.add_flags(_u, ['\\Deleted'])
+                                if has_uidplus:
+                                    c.uid_expunge(_u)
+                        ms._safe_exec(acc, _op)
+                        Email.query.filter(Email.id.in_(batch_ids)).update({'folder': trash}, synchronize_session=False)
+                        db.session.commit()
+                        count += len(batch_emails)
+                    else:
+                        def _op(c, _u=batch_uids):
+                            c.select_folder(fldr, readonly=False)
+                            c.add_flags(_u, ['\\Deleted'])
+                            if has_uidplus:
+                                c.uid_expunge(_u)
+                        ms._safe_exec(acc, _op)
+                        if has_uidplus:
+                            for e in batch_emails:
+                                for att in e.attachments:
+                                    att.delete_from_disk()
+                            Email.query.filter(Email.id.in_(batch_ids)).delete(synchronize_session=False)
+                            db.session.commit()
+                            count += len(batch_emails)
+                        # sem UIDPLUS: fica só flagado \Deleted no servidor,
+                        # sem remover localmente (nunca EXPUNGE genérico — B7)
+
+                elif action in ('mark_spam', 'mark_not_spam'):
+                    if target and fldr != target:
+                        def _op(c, _u=batch_uids, _target=target):
+                            c.select_folder(fldr, readonly=False)
+                            if has_move:
+                                c.move(_u, _target)
+                            else:
+                                c.copy(_u, _target)
+                                c.add_flags(_u, ['\\Deleted'])
+                                if has_uidplus:
+                                    c.uid_expunge(_u)
+                        ms._safe_exec(acc, _op)
+                        Email.query.filter(Email.id.in_(batch_ids)).update({'folder': target}, synchronize_session=False)
+                        db.session.commit()
+                        count += len(batch_emails)
+
+            except Exception as e:
+                # Um lote falhando não aborta os outros — com milhares de
+                # mensagens, melhor processar o que der do que travar tudo.
+                log.warning(f'bulk {action} error (acc={acc_id} folder={fldr} batch={len(batch_uids)}): {e}')
+                errors.append(f'{acc.email}/{fldr}: {e}')
+                try: db.session.rollback()
+                except Exception: pass
 
     return jsonify({'ok': count > 0 or not errors, 'count': count, 'errors': errors})
 
