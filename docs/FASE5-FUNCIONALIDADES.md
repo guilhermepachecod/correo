@@ -1,7 +1,11 @@
 # correo — Fase 5: funcionalidades
 
-Complemento do `docs/CORRECOES.md`. **Só começar depois da Fase 2 (sincronização)
-estar entregue e testada**, porque as visões unificadas dependem de `folder_state.role`.
+Complemento do `docs/CORRECOES.md`. Fase 2 (sincronização) está entregue —
+`folder_state.role` e `GET /api/emails?view=...` já existem e as visões
+unificadas (seção 1 abaixo) podem começar. **Ressalva importante**: a Fase 2
+só foi testada com `imapclient.IMAPClient` mockado, nunca contra um servidor
+IMAP real (sem acesso a um neste ambiente de trabalho) — vale validar isso
+com uma conta real antes ou em paralelo a começar a Fase 5.
 
 Mesmas regras gerais do `CORRECOES.md`: commits pequenos (`fase5: ...`), não quebrar a
 API existente, autenticação e CSRF em todas as rotas novas, testes junto com cada item.

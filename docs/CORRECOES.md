@@ -3,14 +3,16 @@
 Documento de trabalho para o agente de código. Leia inteiro antes de começar.
 Trabalhe em fases, na ordem, com commits pequenos por item. Não pule fases.
 
-> **Status:** Fase 1 (segurança) entregue e em `main`, incluindo as pendências
+> **Status:** Fase 1 (segurança) entregue, incluindo as pendências
 > encontradas no primeiro deploy real (ver `docs/FASE5-FUNCIONALIDADES.md`,
-> seção 0). Fase 2.1-2.3 (modelo de dados, conexão IMAP persistente, pastas
-> especiais) entregue em `main` — ver nota em cada subseção. **Importante:**
-> 2.2 (`services/imap_connection.py`) só foi testado com mocks de
-> `imapclient.IMAPClient`, nunca contra um servidor IMAP real, e ainda não
-> está conectado a `idle_manager.py`/`mail_service.py` — isso é a 2.4/2.5,
-> próximo passo (ver seção 8).
+> seção 0). Fase 2 completa (2.1 a 2.9) — ver ressalvas em cada subseção da
+> seção 4. **O mais importante: nada da Fase 2 foi testado contra um
+> servidor IMAP real** (só `imapclient.IMAPClient` mockado em todos os
+> testes) — este ambiente de trabalho não tem acesso a um IMAP de teste
+> nem a Docker. Validar com uma conta real (de preferência não crítica)
+> antes de confiar nisso para as 8 contas de produção em
+> `mail.soft.dev.br`/Gmail/`e-dominios.com.br`. Fase 3 (testes com Dovecot
+> real) é o próximo passo natural pra fechar essa lacuna — ver seção 8.
 
 ---
 
@@ -152,7 +154,7 @@ templates/index.html
 
 ---
 
-## 4. Fase 2 — Reescrita do núcleo de sincronização ⏳ em andamento (2.1-2.3 ✅, 2.4+ pendente)
+## 4. Fase 2 — Reescrita do núcleo de sincronização ✅ entregue (ver ressalvas por item abaixo)
 
 Reescrever `services/mail_service.py` (parte de sync/ações), `services/idle_manager.py`
 e `services/imap_pool.py`. Usar a biblioteca **`imapclient`** no lugar de `imaplib` cru.
@@ -223,6 +225,22 @@ Para cada pasta sincronizada:
 6. Salvar `uidvalidity`, `uidnext`, `highestmodseq`, `last_sync` em `folder_state`.
 7. Emitir eventos Socket.IO agregados por pasta (`new_emails`, `flags_updated`, `emails_removed`).
 
+> **Entregue** em `MailService.sync_folder_incremental` (ver commit
+> `fase2.4/2.6/2.7: ...`). Simplificações deliberadas (usam o fallback que o
+> próprio item 3/4 já permite, não um atalho fora do spec):
+> - **Sem CONDSTORE/QRESYNC** — sempre usa o fallback "`FETCH 1:* (UID FLAGS)`
+>   completo" descrito no item 4 e "`UID SEARCH ALL`" do item 5. Funciona,
+>   mas não é o caminho mais eficiente para caixas muito grandes. Otimizar
+>   com CONDSTORE/QRESYNC (a capability já é detectada e cacheada em
+>   `Account.capabilities`) fica pra depois, se necessário.
+> - **Sem a otimização "headers primeiro, corpo das N mais recentes"** do
+>   item 3 — baixa o corpo completo (`BODY.PEEK[]`) de toda mensagem nova,
+>   em lotes de 50. Corrige os bugs (nada é descartado), só não é o jeito
+>   mais rápido pra uma pasta com milhares de mensagens não sincronizadas.
+> - `HIGHESTMODSEQ` **não é lido nem salvo ainda** (coluna existe em
+>   `folder_state` desde a 2.1, mas fica null até o CONDSTORE acima ser
+>   implementado — não é usado pra nada no momento).
+
 ### 2.5 IDLE e agendamento (resolve B3, B4)
 - IDLE na INBOX. **Qualquer** resposta não solicitada (`EXISTS`, `EXPUNGE`, `FETCH`,
   `RECENT`) dispara a **sync incremental da pasta (2.4)**. Nunca usar números de sequência.
@@ -231,6 +249,15 @@ Para cada pasta sincronizada:
   abriu recentemente: sync incremental periódica a cada `CORREO_POLL_SECONDS`
   (padrão 120) usando a conexão de comandos.
 - Ao abrir uma pasta na UI, disparar sync incremental dela imediatamente.
+
+> **Entregue** em `services/idle_manager.py` (ver commit `fase2.5: ...`).
+> Pendente: "ao abrir uma pasta na UI, disparar sync incremental dela
+> imediatamente" — ainda não existe rota para isso; hoje só a INBOX (IDLE)
+> e as pastas com role (`CORREO_POLL_SECONDS`) são mantidas atualizadas
+> automaticamente. **Não testado contra um servidor IMAP real** — só com
+> `imapclient.IMAPClient` mockado (sem acesso a um servidor de teste neste
+> ambiente de trabalho). Validar com uma conta real antes de confiar nisso
+> para as 8 contas de produção.
 
 ### 2.6 Ações: servidor primeiro (resolve B1, B7)
 Para delete, move, spam, read/unread, star/unstar e bulk:
@@ -248,6 +275,13 @@ Regras:
 - Ações em lote agrupam UIDs por pasta num único comando.
 - A UI pode aplicar atualização otimista, mas deve **reverter** se a API retornar erro.
 
+> **Entregue** em `MailService.delete_email/move_email/set_spam/
+> mark_*_on_server` + `routes/emails.py` (502 em erro) + frontend
+> (`markUnread`/`toggleSpam`/bulk mark_read/unread desfazem a UI em erro —
+> ver commit `frontend: ...`). "Gmail: excluir = mover pra `\Trash`" já
+> funciona pela via genérica (SPECIAL-USE detecta `\Trash` igual em
+> qualquer servidor, não precisou de caso especial pra Gmail).
+
 ### 2.7 Limite de armazenamento (resolve B2)
 - Remover `enforce_email_limit` que apaga linhas.
 - Substituir por **poda de corpo**: para mensagens além de `CORREO_MAX_BODIES_PER_ACCOUNT`
@@ -257,16 +291,34 @@ Regras:
 - `GET /api/emails/<id>`: se `body_cached=false`, buscar `BODY.PEEK[]` no servidor,
   salvar e retornar.
 
+> **Entregue**: `prune_old_bodies()` + `fetch_full_body()` (ver commit
+> `fase2.4/2.6/2.7: ...`). Chamado automaticamente ao fim de cada
+> `sync_folder_incremental`.
+
 ### 2.8 Concorrência com SQLite
 - Manter WAL. Cada thread de background usa seu próprio `app.app_context()` e
   sessão; fechar a sessão ao fim de cada unidade de trabalho.
 - Serializar escritas com um lock global de escrita (ou fila única de escrita) para
   eliminar `database is locked`.
 
+> **Parcial**: WAL + `app.app_context()` por thread já vêm da Fase 1/2.1-2.5
+> (nenhuma mudança nova aqui). **Lock global de escrita não foi
+> adicionado** — com `busy_timeout=30000` (Fase 1) e WAL, escritas
+> concorrentes esperam até 30s em vez de falhar na hora, o que cobre o
+> padrão de uso atual (poucas threads, commits pequenos e frequentes). Se
+> aparecer `database is locked` em produção com as 8 contas reais, é aqui
+> que entra o lock global/fila — fica pendente até esse sinal aparecer.
+
 ### 2.9 Visões unificadas
 - `/api/emails?view=inbox|unread|starred|sent|trash` agrega todas as contas usando
   `folder_state.role` (não o nome da pasta).
 - `view=unread` = INBOX de todas as contas com `is_read=false`.
+
+> **Entregue** em `routes/emails.py` (`GET /api/emails?view=...`) — ver
+> commit `fase2.6/2.9: ...`. Aditivo: sem `view=`, o comportamento é
+> idêntico ao de antes da Fase 2. A barra lateral com o menu "Todas as
+> contas" (seção 1 de `docs/FASE5-FUNCIONALIDADES.md`) ainda não existe —
+> só o backend está pronto para ela.
 
 ### Critérios de aceite da Fase 2
 - Excluir uma mensagem com o servidor fora do ar: a UI mostra erro e a mensagem **não** some.
@@ -337,18 +389,20 @@ cypht.soft.dev.br:18443 {
 ## 8. Ordem de entrega
 
 1. Fase 1 completa (segurança) → commit(s) → app sobe com login. **✅ entregue.**
-2. Fase 2.1 a 2.3 (modelo, conexões, pastas especiais). **✅ entregue** — ver
-   nota em cada subseção da seção 4. `imap_connection.py` existe mas ainda
-   não está ligado a nada; sync em produção não mudou de comportamento.
-3. Fase 2.4 e 2.5 (sync incremental e IDLE). **← próximo passo.** É a parte
-   de maior risco (troca o algoritmo de sync de verdade, liga o
-   `imap_connection.py`) — pedir validação contra uma conta real antes do
-   push, já que não há servidor IMAP real disponível neste ambiente para
-   testar.
-4. Fase 2.6 e 2.7 (ações servidor-primeiro e poda de corpo).
-5. Fase 2.8 e 2.9 (concorrência e visões unificadas).
-6. Fase 3 (testes) — escrever junto com cada item quando possível.
-7. Fase 4 (empacotamento e README).
+2. Fase 2.1 a 2.3 (modelo, conexões, pastas especiais). **✅ entregue.**
+3. Fase 2.4 e 2.5 (sync incremental e IDLE). **✅ entregue** — ver ressalvas
+   na seção 4 (sem CONDSTORE/QRESYNC, sem servidor real de teste).
+4. Fase 2.6 e 2.7 (ações servidor-primeiro e poda de corpo). **✅ entregue.**
+5. Fase 2.8 e 2.9 (concorrência e visões unificadas). **✅ entregue**
+   (2.8 parcial — sem lock global, ver ressalva na seção 4).
+6. Fase 3 (testes) — **← próximo passo real.** Os testes atuais usam
+   `imapclient.IMAPClient` mockado; nada da Fase 2 rodou contra um IMAP de
+   verdade. Montar o Dovecot de teste em container é o que fecha essa
+   lacuna antes de confiar 100% nisso pras 8 contas de produção.
+7. Fase 4 (empacotamento e README) — parcialmente já coberto na Fase 1
+   (gunicorn, usuário não-root, `.env.example`, README); falta o
+   `docker-compose.yml` final e o job de testes já está no CI desde a
+   Fase 2.1.
 
 Ao final de cada etapa, rodar os testes e listar no resumo do commit o que foi verificado.
 
