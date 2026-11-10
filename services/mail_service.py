@@ -657,13 +657,14 @@ class MailService:
             s.sendmail(account.email, recipients, msg.as_string())
             s.quit()
 
-            try:
-                sent_folder = self.role_folder(account, 'sent')
-                if sent_folder:
-                    raw = msg.as_bytes()
-                    self._safe_exec(account, lambda c: c.append(sent_folder, raw, flags=['\\Seen']))
-            except Exception as e:
-                log.warning(f'Could not save to Sent: {e}')
+            if account.save_sent_copy:
+                try:
+                    sent_folder = self.role_folder(account, 'sent')
+                    if sent_folder:
+                        raw = msg.as_bytes()
+                        self._safe_exec(account, lambda c: c.append(sent_folder, raw, flags=['\\Seen']))
+                except Exception as e:
+                    log.warning(f'Could not save to Sent: {e}')
 
             return {'ok': True}
         except Exception as e:

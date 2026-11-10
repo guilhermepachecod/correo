@@ -66,8 +66,17 @@
         <span class="sidebar-setting-label">Notif</span>
         <button id="toggle-notif" class="sidebar-setting-btn" onclick="toggleBrowserNotifications()">🔕 Notif: OFF</button>
       </div>
+      <div class="sidebar-setting">
+        <span class="sidebar-setting-label">Abrir em</span>
+        <select id="startup-view-select" class="sidebar-setting-btn" onchange="setStartupView(this.value)">
+          <option value="last">Última visão</option>
+          <option value="all">Todos</option>
+          <option value="unread">Não lidos</option>
+          <option value="starred">Com estrela</option>
+        </select>
+      </div>
       <div class="sidebar-divider"></div>
-      <div class="shortcuts-hint">j/k navegar · c compor · / buscar<br>s estrela · e excluir · u não lido</div>
+      <div class="shortcuts-hint">j/k navegar · c compor · / buscar<br>s estrela · e excluir · u não lido<br>g a todos · g u não lidos · g s estrela</div>
     </div>
   </div>
 
@@ -286,6 +295,13 @@
         <label class="form-check"><input type="checkbox" id="af-smtp-ssl"> SSL</label>
         <label class="form-check"><input type="checkbox" id="af-smtp-tls" checked> STARTTLS</label>
       </div>
+      <hr class="form-divider">
+      <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+        <label class="form-label" style="width:auto;">Cor do marcador</label>
+        <input type="color" id="af-marker-color" style="width:36px;height:26px;border:1px solid var(--line);border-radius:4px;cursor:pointer;padding:0;background:transparent;">
+        <span id="af-marker-color-default" style="font-size:11px;color:var(--muted);cursor:pointer;">usar cor automática</span>
+      </div>
+      <label class="form-check form-group"><input type="checkbox" id="af-save-sent-copy" checked> Salvar cópia em Enviados ao mandar e-mail</label>
     </div>
     <div id="account-box-footer">
       <button class="btn btn-ghost" onclick="closeAccountModal()">Cancelar</button>

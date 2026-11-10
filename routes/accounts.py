@@ -53,6 +53,8 @@ def create_account():
             smtp_host=data['smtp_host'], smtp_port=int(data['smtp_port']),
             smtp_ssl=data.get('smtp_ssl', False), smtp_tls=data.get('smtp_tls', True),
             username=data['username'], conf_file=conf_filename,
+            marker_color=data.get('marker_color') or None,
+            save_sent_copy=data.get('save_sent_copy', True),
         )
         account.set_password(data['password'])
         db.session.add(account)
@@ -66,13 +68,20 @@ def create_account():
         return jsonify({'error': str(e)}), 500
 
 
+_CONNECTION_FIELDS = {'imap_host', 'imap_port', 'imap_ssl', 'smtp_host',
+                      'smtp_port', 'smtp_ssl', 'smtp_tls', 'username'}
+
+
 @bp.put('/api/accounts/<int:account_id>')
 def update_account(account_id):
     account = Account.query.get_or_404(account_id)
     data = request.json
     old_conf = account.conf_file
+    needs_reconnect = bool(data.get('password')) or any(
+        field in data and data[field] != getattr(account, field) for field in _CONNECTION_FIELDS)
     for field in ['name', 'email', 'imap_host', 'imap_port', 'imap_ssl',
-                  'smtp_host', 'smtp_port', 'smtp_ssl', 'smtp_tls', 'username']:
+                  'smtp_host', 'smtp_port', 'smtp_ssl', 'smtp_tls', 'username',
+                  'marker_color', 'save_sent_copy']:
         if field in data:
             setattr(account, field, data[field])
     if data.get('password'):
@@ -88,8 +97,11 @@ def update_account(account_id):
         account.conf_file = new_conf
     db.session.commit()
     write_conf(adir / account.conf_file, account_to_conf_data(account))
-    im = _idle()
-    if im: im.restart_account(account_id)
+    # Só reconecta (novo login no IMAP) se algo que afeta a conexão mudou —
+    # cor do marcador/preferência de Enviados não justificam derrubar o IDLE.
+    if needs_reconnect:
+        im = _idle()
+        if im: im.restart_account(account_id)
     return jsonify(account.to_dict())
 
 

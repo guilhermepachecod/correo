@@ -224,6 +224,7 @@ function _dropFromList(emailId) {
 
 function _accountColor(accountId) {
   const acc = state.accounts.find(a => a.id === accountId);
+  if (acc?.marker_color) return acc.marker_color;
   const key = acc ? acc.email : String(accountId);
   let hash = 0;
   for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;

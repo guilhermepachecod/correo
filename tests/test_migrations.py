@@ -15,7 +15,8 @@ def test_migrations_create_expected_schema():
         assert {'accounts', 'emails', 'attachments', 'folder_state', 'schema_version'} <= tables
 
         account_cols = {c['name'] for c in insp.get_columns('accounts')}
-        assert {'auth_error', 'auth_error_at', 'capabilities'} <= account_cols
+        assert {'auth_error', 'auth_error_at', 'capabilities',
+                'marker_color', 'save_sent_copy'} <= account_cols
 
         email_cols = {c['name'] for c in insp.get_columns('emails')}
         assert 'body_cached' in email_cols

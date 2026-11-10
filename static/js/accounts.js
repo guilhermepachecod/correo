@@ -269,8 +269,13 @@ function selectFolder(accountId, folderKey, realFolders) {
   renderAccountTree();
   loadEmails();
 
-  // Não dispara sync aqui — o IDLE já cuida de manter a INBOX atualizada.
-  // Sync manual fica pelo botão ↻ ou pelo auto-sync configurado.
+  // Fase 2.5: abrir a pasta dispara uma sync incremental avulsa dela — não
+  // bloqueia a lista (que já veio do cache local), só adianta a próxima
+  // atualização em vez de esperar o IDLE (só INBOX) ou o poll (120s).
+  for (const folder of realFolders) {
+    api(`/api/accounts/${accountId}/folders/${encodeURIComponent(folder)}/sync`,
+        { method: 'POST' }).catch(() => {});
+  }
 }
 
 // ── Modal de contas ───────────────────────────────────────────────────────────
@@ -327,8 +332,29 @@ function editAccount(id) {
   document.getElementById('af-smtp-port').value  = a.smtp_port;
   document.getElementById('af-smtp-ssl').checked = a.smtp_ssl;
   document.getElementById('af-smtp-tls').checked = a.smtp_tls;
+  document.getElementById('af-save-sent-copy').checked = a.save_sent_copy !== false;
+  _setMarkerColorField(a.marker_color || null);
   document.getElementById('account-form-title').textContent = 'Editar conta';
 }
+
+// ── Cor do marcador (visões unificadas) ────────────────────────────────────────
+
+function _setMarkerColorField(color) {
+  const input = document.getElementById('af-marker-color');
+  input.dataset.custom = color ? '1' : '0';
+  input.value = color || '#6c8cff';
+}
+
+function useAutoMarkerColor() {
+  _setMarkerColorField(null);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const colorInput = document.getElementById('af-marker-color');
+  if (colorInput) colorInput.addEventListener('input', () => { colorInput.dataset.custom = '1'; });
+  const autoLink = document.getElementById('af-marker-color-default');
+  if (autoLink) autoLink.addEventListener('click', useAutoMarkerColor);
+});
 
 async function deleteAccount(id) {
   if (!confirm('Remover esta conta? Os e-mails serão mantidos.')) return;
@@ -354,6 +380,8 @@ function clearAccountForm() {
   document.getElementById('af-smtp-tls').checked = true;
   document.getElementById('af-imap-port').value  = 993;
   document.getElementById('af-smtp-port').value  = 587;
+  document.getElementById('af-save-sent-copy').checked = true;
+  _setMarkerColorField(null);
 }
 
 async function saveAccount() {
@@ -369,6 +397,9 @@ async function saveAccount() {
     smtp_port: parseInt(document.getElementById('af-smtp-port').value),
     smtp_ssl: document.getElementById('af-smtp-ssl').checked,
     smtp_tls: document.getElementById('af-smtp-tls').checked,
+    save_sent_copy: document.getElementById('af-save-sent-copy').checked,
+    marker_color: document.getElementById('af-marker-color').dataset.custom === '1'
+      ? document.getElementById('af-marker-color').value : null,
   };
   if (!data.name || !data.email || !data.imap_host || !data.smtp_host) {
     toast('Preencha todos os campos obrigatórios', 'error'); return;

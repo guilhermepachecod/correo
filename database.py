@@ -50,6 +50,11 @@ class Account(db.Model):
     auth_error    = db.Column(db.Text, nullable=True)
     auth_error_at = db.Column(db.DateTime, nullable=True)
     capabilities  = db.Column(db.Text, nullable=True)  # JSON da CAPABILITY do servidor
+    # Fase 5.1/5.2: cor do marcador na visão unificada (null = gerada por
+    # hash do e-mail, ver _accountColor em emails.js) e se envia cópia pra
+    # Sent ao mandar e-mail (default True preserva o comportamento de antes).
+    marker_color    = db.Column(db.String(20), nullable=True)
+    save_sent_copy  = db.Column(db.Boolean, default=True, nullable=False)
     emails  = db.relationship('Email', backref='account', lazy='dynamic', cascade='all, delete-orphan')
     filters = db.relationship('EmailFilter', backref='account', lazy='dynamic', cascade='all, delete-orphan')
 
@@ -74,7 +79,8 @@ class Account(db.Model):
                 'imap_host': self.imap_host, 'imap_port': self.imap_port, 'imap_ssl': self.imap_ssl,
                 'smtp_host': self.smtp_host, 'smtp_port': self.smtp_port, 'smtp_ssl': self.smtp_ssl,
                 'smtp_tls': self.smtp_tls, 'username': self.username, 'conf_file': self.conf_file,
-                'last_sync': self.last_sync.isoformat() if self.last_sync else None}
+                'last_sync': self.last_sync.isoformat() if self.last_sync else None,
+                'marker_color': self.marker_color, 'save_sent_copy': self.save_sent_copy}
 
 
 class Email(db.Model):
@@ -310,6 +316,19 @@ def _migration_002_folder_state(conn) -> None:
             pass
 
 
+def _migration_003_account_prefs(conn) -> None:
+    """Fase 5.1/5.2: cor do marcador por conta e toggle de cópia em Enviados."""
+    statements = [
+        "ALTER TABLE accounts ADD COLUMN marker_color VARCHAR(20)",
+        "ALTER TABLE accounts ADD COLUMN save_sent_copy BOOLEAN DEFAULT 1 NOT NULL",
+    ]
+    for sql in statements:
+        try:
+            conn.execute(db.text(sql)); conn.commit()
+        except Exception:
+            pass
+
+
 # Lista ordenada de migrações. Cada uma roda exatamente uma vez por banco —
 # a versão aplicada fica registrada em schema_version. Para adicionar uma
 # migração nova, só acrescentar uma tupla (N, fn) no fim, nunca remover ou
@@ -317,6 +336,7 @@ def _migration_002_folder_state(conn) -> None:
 MIGRATIONS = [
     (1, _migration_001_legacy),
     (2, _migration_002_folder_state),
+    (3, _migration_003_account_prefs),
 ]
 
 
