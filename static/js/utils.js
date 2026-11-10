@@ -1,5 +1,16 @@
 // utils.js — funções puras, zero dependências externas
 
+// Agrupa chamadas repetidas em uma só, "wait" ms depois da última — usado
+// pra evitar re-renderizar a sidebar várias vezes em sequência quando o
+// IDLE/poll de várias contas/pastas dispara eventos em rajada.
+function debounce(fn, wait) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
+}
+
 // ── API (fetch único) ──────────────────────────────────────────────────────
 // TODA chamada a /api/* no frontend DEVE passar por api(), nunca por fetch()
 // direto — é o único lugar que injeta o header X-Correo-CSRF em métodos

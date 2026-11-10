@@ -2,16 +2,24 @@
 
 const socket = io();
 
+// A sidebar (contagens + árvore de contas/pastas) só re-renderiza no máximo
+// 1x por janela de 600ms, mesmo que vários eventos de sync cheguem em
+// rajada (IDLE + poll de várias contas/pastas) — sincroniza tudo primeiro,
+// atualiza a tela depois, em vez de piscar uma vez por evento. O estado
+// (syncingIds, syncErrors etc.) é sempre atualizado na hora; só o render
+// é agrupado. refreshFolderCounts() já busca as contagens do banco (nunca
+// do IMAP) e chama renderAccountTree() no final.
+const _scheduleSidebarRefresh = debounce(() => { refreshFolderCounts(); }, 600);
+
 socket.on('sync_start', d => {
   state.syncingIds.add(d.account_id);
-  renderAccountTree();
+  _scheduleSidebarRefresh();
 });
 
 socket.on('sync_done', d => {
   state.syncingIds.delete(d.account_id);
   state.syncErrors[d.account_id] = null;
   state.lastSyncTime[d.account_id] = Date.now();
-  renderAccountTree();
 
   const isCurrentAccount = !state.selectedAccountId || state.selectedAccountId === d.account_id;
   const hasNew   = d.new   && d.new   > 0;
@@ -19,11 +27,8 @@ socket.on('sync_done', d => {
 
   if (isCurrentAccount && (hasNew || hasFlags)) {
     loadEmails(false, true);  // silencioso — IDLE/poll em background, sem piscar a lista
-    refreshFolderCounts();
-  } else if (hasNew || hasFlags) {
-    // Outra conta — só atualiza contagens da sidebar
-    refreshFolderCounts();
   }
+  _scheduleSidebarRefresh();
 
   if (hasNew)
     showSyncNotification(`${d.new} nova${d.new > 1 ? 's' : ''} mensagem${d.new > 1 ? 'ns' : ''} em ${d.email}`);
@@ -39,7 +44,7 @@ socket.on('sync_error', d => {
   } else {
     showSyncNotification('Erro ao sincronizar: verifique a conta', 'error');
   }
-  renderAccountTree();
+  _scheduleSidebarRefresh();
 });
 
 socket.on('new_email', d => {
@@ -51,8 +56,7 @@ socket.on('new_email', d => {
   if (isCurrentAccount && isInbox) {
     loadEmails(false, true);  // silencioso — chegou via IDLE, sem piscar a lista
   }
-  // Sempre atualiza contagens da sidebar
-  refreshFolderCounts();
+  _scheduleSidebarRefresh();
 
   if (d.email) _sendBrowserNotif(d.email.subject, d.email.from_name || d.email.from_addr, d.email);
 });
@@ -83,7 +87,7 @@ socket.on('flags_updated', d => {
       }
       if (Object.keys(patch).length) { _patchEmailItem(upd.id, patch); changed = true; }
     }
-    if (changed) refreshFolderCounts();
+    if (changed) _scheduleSidebarRefresh();
   }
 });
 
@@ -94,7 +98,7 @@ socket.on('emails_removed', d => {
     const hadSelected = state.selectedEmailId && idSet.has(state.selectedEmailId);
     state.emails = state.emails.filter(e => !idSet.has(e.id));
     renderEmailList();
-    refreshFolderCounts();
+    _scheduleSidebarRefresh();
     if (hadSelected) {
       hideEmail();
       state.selectedEmailId = null;
