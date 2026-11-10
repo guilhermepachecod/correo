@@ -18,7 +18,7 @@ socket.on('sync_done', d => {
   const hasFlags = d.flag_changes && d.flag_changes > 0;
 
   if (isCurrentAccount && (hasNew || hasFlags)) {
-    loadEmails();
+    loadEmails(false, true);  // silencioso — IDLE/poll em background, sem piscar a lista
     refreshFolderCounts();
   } else if (hasNew || hasFlags) {
     // Outra conta — só atualiza contagens da sidebar
@@ -49,7 +49,7 @@ socket.on('new_email', d => {
     state.selectedFolderReals.some(f => /^inbox$/i.test(f));
 
   if (isCurrentAccount && isInbox) {
-    loadEmails();
+    loadEmails(false, true);  // silencioso — chegou via IDLE, sem piscar a lista
   }
   // Sempre atualiza contagens da sidebar
   refreshFolderCounts();
@@ -58,11 +58,20 @@ socket.on('new_email', d => {
 });
 
 socket.on('flags_updated', d => {
-  if (!state.selectedAccountId || d.account_id === state.selectedAccountId) {
+  const matchesCurrentScope = state.currentView
+    ? true   // visão unificada agrega todas as contas
+    : (!state.selectedAccountId || d.account_id === state.selectedAccountId);
+  if (matchesCurrentScope) {
     let changed = false;
     for (const upd of (d.updates || [])) {
       const email = state.emails.find(e => e.id === upd.id);
       if (!email) continue;
+      // Visão "Não lidos": se outro cliente marcou como lido, some da lista.
+      if (state.currentView === 'unread' && 'is_read' in upd && upd.is_read) {
+        _dropFromList(upd.id);
+        changed = true;
+        continue;
+      }
       // upd só traz os campos que de fato mudaram — nunca aplicar uma
       // chave ausente (senão vira undefined e corrompe o estado local)
       const patch = {};
@@ -107,7 +116,7 @@ socket.on('imap_search_done', d => {
   } else {
     showSyncNotification(
       `Busca: ${d.found} resultado(s) no servidor${d.new ? `, ${d.new} novo(s)` : ''}`, 'info');
-    if (d.new > 0) loadEmails();
+    if (d.new > 0) loadEmails(false, true);
   }
 });
 

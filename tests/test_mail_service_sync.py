@@ -75,13 +75,17 @@ def test_first_sync_downloads_all_without_cap(monkeypatch):
         acc = _make_account('sync1@example.com')
 
         fake = FakeClient()
-        fake.all_uids = set(range(1, 301))  # 300 mensagens — maior que qualquer batch
+        # 120 mensagens — mais que o BATCH_SIZE (50), confirma que não há
+        # cap tipo [-100:]/[-200:] que descartava o excedente (bug B9).
+        # Não usa um número maior só pra não deixar o teste lento: cada
+        # mensagem nova faz um commit (ver _save_fetched).
+        fake.all_uids = set(range(1, 121))
         ms = _ms_with_fake(monkeypatch, fake)
 
         result = ms.sync_folder_incremental(acc, 'INBOX')
         assert result['ok'] is True
-        assert result['new'] == 300
-        assert Email.query.filter_by(account_id=acc.id, folder='INBOX').count() == 300
+        assert result['new'] == 120
+        assert Email.query.filter_by(account_id=acc.id, folder='INBOX').count() == 120
 
         fs = FolderState.query.filter_by(account_id=acc.id, folder='INBOX').first()
         assert fs.uidvalidity == 111

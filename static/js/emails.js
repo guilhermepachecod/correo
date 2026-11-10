@@ -57,15 +57,17 @@ function _initScrollInfinite() {
   });
 }
 
-async function loadEmails(append = false) {
+async function loadEmails(append = false, silent = false) {
   const loading = document.getElementById('list-loading');
   const empty   = document.getElementById('list-empty');
 
   if (!append) {
     state.currentPage = 1;
     state.hasMore = false;
-    loading.style.display = 'flex';
-    empty.style.display = 'none';
+    // silent=true: atualização em background (chegou e-mail novo, IDLE
+    // ressincronizou) — não mostra o spinner de carregamento cheio, só
+    // troca o conteúdo da lista por baixo (_applyEmailDiff já é suave).
+    if (!silent) { loading.style.display = 'flex'; empty.style.display = 'none'; }
   } else {
     if (state.isLoadingMore || !state.hasMore) return;
     state.isLoadingMore = true;
@@ -78,13 +80,23 @@ async function loadEmails(append = false) {
 
   try {
     let all = [], anyHasMore = false;
-    for (const folder of folders) {
-      const params = new URLSearchParams({ folder, page: state.currentPage, per_page: PER_PAGE });
-      if (accountId) params.set('account_id', String(accountId));
+    if (state.currentView) {
+      // Visão unificada: um único request agrega todas as contas pelo role
+      // da pasta no servidor (não precisa iterar pasta por pasta aqui).
+      const params = new URLSearchParams({ view: state.currentView, page: state.currentPage, per_page: PER_PAGE });
       if (state.searchQuery) params.set('search', state.searchQuery);
       const data = await (await api(`/api/emails?${params}`)).json();
-      all = all.concat(data.emails);
-      if (data.page < data.pages) anyHasMore = true;
+      all = data.emails;
+      anyHasMore = data.page < data.pages;
+    } else {
+      for (const folder of folders) {
+        const params = new URLSearchParams({ folder, page: state.currentPage, per_page: PER_PAGE });
+        if (accountId) params.set('account_id', String(accountId));
+        if (state.searchQuery) params.set('search', state.searchQuery);
+        const data = await (await api(`/api/emails?${params}`)).json();
+        all = all.concat(data.emails);
+        if (data.page < data.pages) anyHasMore = true;
+      }
     }
     state.hasMore = anyHasMore;
     const sorted  = sortEmails(all);
@@ -100,7 +112,7 @@ async function loadEmails(append = false) {
     }
     _updateEmailCountBar();
   } catch(e) {
-    toast('Erro ao carregar e-mails', 'error');
+    if (!silent) toast('Erro ao carregar e-mails', 'error');
   } finally {
     loading.style.display = 'none';
     state.isLoadingMore = false;
@@ -198,6 +210,31 @@ function _appendEmailItems(emails) {
   renderBulkBar();
 }
 
+// Remove um item da lista com animação, sem recarregar nada do servidor —
+// usado quando a mensagem deixa de pertencer à visão atual (ex: marcada
+// como lida na visão "Não lidos").
+function _dropFromList(emailId) {
+  state.emails = state.emails.filter(e => e.id !== emailId);
+  const el = document.querySelector(`.email-item[data-id="${emailId}"]`);
+  if (el) { el.classList.add('removing'); setTimeout(() => el.remove(), 200); }
+  _updateEmailCountBar();
+}
+
+// ── Marcador de conta (visões unificadas) ──────────────────────────────────────
+
+function _accountColor(accountId) {
+  const acc = state.accounts.find(a => a.id === accountId);
+  const key = acc ? acc.email : String(accountId);
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return `hsl(${hash % 360}, 60%, 55%)`;
+}
+
+function _accountLabel(accountId) {
+  const acc = state.accounts.find(a => a.id === accountId);
+  return acc ? acc.email : '';
+}
+
 // ── Construção de item ────────────────────────────────────────────────────────
 
 function _buildEmailItem(email) {
@@ -218,6 +255,7 @@ function _buildEmailItem(email) {
       ${email.is_read ? '<span class="dot-read"></span>' : '<span class="dot-unread"></span>'}
       <span class="icon-star ${email.is_starred ? 'starred' : ''}" onclick="quickStar(event,${email.id})">★</span>
       ${email.has_attachments ? '<span class="icon-attach">📎</span>' : ''}
+      ${state.currentView ? `<span class="ei-account-dot" style="background:${_accountColor(email.account_id)}" title="${esc(_accountLabel(email.account_id))}"></span>` : ''}
     </div>
     <div class="ei-from">${esc(email.from_name || email.from_addr)}</div>
     <div class="ei-subject">
