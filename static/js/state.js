@@ -28,6 +28,8 @@ const state = {
   syncingIds:         new Set(),
   lastSyncTime:       {},
   authFailed:         new Set(),
+  currentView:        null,   // null = navegando por conta/pasta; senão 'all'|'unread'|'starred'|'sent'|'trash'
+  viewCounts:         {},
 };
 
 const MIN_SYNC_GAP_MS = 5 * 60 * 1000;
