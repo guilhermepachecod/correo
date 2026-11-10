@@ -9,6 +9,8 @@ services:
       - ./database:/app/database
       - ./accounts:/app/accounts
       - ./attachments:/app/database/attachments
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=America/Sao_Paulo
