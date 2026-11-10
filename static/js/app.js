@@ -1,4 +1,4 @@
-// app.js — orquestrador: init, tema, layout, resize, autosync, notificações, atalhos
+// app.js — orquestrador: init, tema, layout, resize, notificações, atalhos
 
 // ── Sessão ────────────────────────────────────────────────────────────────────
 
@@ -13,7 +13,6 @@ async function init() {
   await initAuth();      // busca o token CSRF antes de qualquer chamada mutável
   await loadSettings();  // carrega do banco antes de qualquer outra coisa
   updateSettingsUI();
-  _startAutoSync();
   _initScrollInfinite();
   await loadAccounts();
   await loadEmails();
@@ -101,8 +100,6 @@ window.addEventListener('resize', applySplit);
 
 function updateSettingsUI() {
   applyTheme(); applyLayout();
-  const sel = document.getElementById('autosync-select');
-  if (sel) sel.value = String(settings.autoSyncMin || 0);
   _updateNotifButton();
 
   // Atualiza toggles de preferências de e-mail
@@ -122,28 +119,6 @@ function toggleDefaultImages() {
 function toggleDefaultViewMode() {
   settings.defaultEmailViewMode = (settings.defaultEmailViewMode || 'html') === 'html' ? 'text' : 'html';
   saveSettings(); updateSettingsUI();
-}
-
-// ── Auto-sync ─────────────────────────────────────────────────────────────────
-
-let _autoSyncTimer = null;
-
-function setAutoSync(val) {
-  settings.autoSyncMin = parseInt(val) || 0;
-  saveSettings(); _startAutoSync();
-}
-
-function _startAutoSync() {
-  if (_autoSyncTimer) { clearInterval(_autoSyncTimer); _autoSyncTimer = null; }
-  if (!settings.autoSyncMin || settings.autoSyncMin <= 0) return;
-  _autoSyncTimer = setInterval(_silentSyncAll, settings.autoSyncMin * 60 * 1000);
-}
-
-async function _silentSyncAll() {
-  for (const acc of state.accounts) {
-    if (!state.syncErrors[acc.id] && !state.syncingIds.has(acc.id))
-      await api(`/api/accounts/${acc.id}/sync`, { method: 'POST' });
-  }
 }
 
 // ── Notificações do navegador ─────────────────────────────────────────────────

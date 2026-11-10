@@ -62,13 +62,35 @@ socket.on('flags_updated', d => {
     let changed = false;
     for (const upd of (d.updates || [])) {
       const email = state.emails.find(e => e.id === upd.id);
-      if (email && email.is_read !== upd.is_read) {
-        email.is_read = upd.is_read;
-        changed = true;
-        _patchEmailItem(upd.id, { is_read: upd.is_read });
+      if (!email) continue;
+      // upd só traz os campos que de fato mudaram — nunca aplicar uma
+      // chave ausente (senão vira undefined e corrompe o estado local)
+      const patch = {};
+      if ('is_read' in upd && email.is_read !== upd.is_read) {
+        email.is_read = upd.is_read; patch.is_read = upd.is_read;
       }
+      if ('is_starred' in upd && email.is_starred !== upd.is_starred) {
+        email.is_starred = upd.is_starred; patch.is_starred = upd.is_starred;
+      }
+      if (Object.keys(patch).length) { _patchEmailItem(upd.id, patch); changed = true; }
     }
     if (changed) refreshFolderCounts();
+  }
+});
+
+socket.on('emails_removed', d => {
+  if (!state.selectedAccountId || d.account_id === state.selectedAccountId) {
+    const idSet = new Set(d.ids || []);
+    if (!idSet.size) return;
+    const hadSelected = state.selectedEmailId && idSet.has(state.selectedEmailId);
+    state.emails = state.emails.filter(e => !idSet.has(e.id));
+    renderEmailList();
+    refreshFolderCounts();
+    if (hadSelected) {
+      hideEmail();
+      state.selectedEmailId = null;
+      toast('Mensagem removida (excluída em outro cliente)', 'info');
+    }
   }
 });
 

@@ -322,19 +322,34 @@ async function bulkAction(action) {
       toast(`${L[action]}: ${result.count} e-mail(s)`, 'success');
     } catch(e) { toast('Erro ao executar ação', 'error'); }
     return;
-  } else if (action === 'mark_read') {
-    state.emails.filter(e => idSet.has(e.id)).forEach(e => { e.is_read = true; _patchEmailItem(e.id, { is_read: true }); });
-  } else if (action === 'mark_unread') {
-    state.emails.filter(e => idSet.has(e.id)).forEach(e => { e.is_read = false; _patchEmailItem(e.id, { is_read: false }); });
   }
+
+  // mark_read / mark_unread: otimista, mas desfaz se o servidor rejeitar
+  const newRead = action === 'mark_read';
+  const prevRead = new Map();
+  state.emails.filter(e => idSet.has(e.id)).forEach(e => {
+    prevRead.set(e.id, e.is_read);
+    e.is_read = newRead;
+    _patchEmailItem(e.id, { is_read: newRead });
+  });
   state.selectedIds.clear();
   renderEmailList();
   refreshFolderCounts();
-  toast(`${L[action]}: ${ids.length} e-mail(s)`, 'success');
-  api('/api/emails/bulk', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
-  }).catch(() => {});
+  try {
+    const res = await api('/api/emails/bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
+    });
+    if (!res.ok) throw new Error('servidor rejeitou');
+    toast(`${L[action]}: ${ids.length} e-mail(s)`, 'success');
+  } catch (e) {
+    for (const [eid, wasRead] of prevRead) {
+      const email = state.emails.find(x => x.id === eid);
+      if (email) { email.is_read = wasRead; _patchEmailItem(eid, { is_read: wasRead }); }
+    }
+    refreshFolderCounts();
+    toast('Erro ao atualizar no servidor — desfeito', 'error');
+  }
 }
 
 async function bulkActionAll(action) {

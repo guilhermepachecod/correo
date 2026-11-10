@@ -78,7 +78,6 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .sidebar-setting-label { font-size:11px; color:var(--muted); flex-shrink:0; }
 .sidebar-setting-btn { background:var(--bg3); border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 7px; cursor:pointer; transition:all var(--trans); white-space:nowrap; }
 .sidebar-setting-btn:hover { border-color:var(--accent); color:var(--accent); }
-.autosync-select { background:var(--bg3); border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 5px; cursor:pointer; }
 .shortcuts-hint { font-size:10px; color:var(--muted); opacity:.5; padding:4px 8px; line-height:1.6; }
 .sync-notif { position:fixed; bottom:60px; right:20px; background:var(--bg3); border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:12px; opacity:0; transform:translateY(8px); transition:all .3s ease; z-index:900; pointer-events:none; max-width:300px; }
 .sync-notif.visible { opacity:1; transform:translateY(0); }

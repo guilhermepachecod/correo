@@ -218,7 +218,9 @@ function closeMobileViewer() {
 
 async function toggleStar() {
   const id = state.selectedEmailId; if (!id) return;
-  const data = await (await api(`/api/emails/${id}/star`, { method: 'POST' })).json();
+  const res = await api(`/api/emails/${id}/star`, { method: 'POST' });
+  if (!res.ok) { toast('Erro ao atualizar estrela no servidor', 'error'); return; }
+  const data = await res.json();
   const btn  = document.getElementById('ev-star-btn');
   btn.textContent = data.starred ? '★ Marcado' : '☆ Marcar';
   btn.style.color = data.starred ? 'var(--amber)' : '';
@@ -226,31 +228,50 @@ async function toggleStar() {
   if (le) { le.is_starred = data.starred; _patchEmailItem(id, { is_starred: data.starred }); }
 }
 
+// Ações servidor-primeiro (Fase 2.6): aplica otimista, mas desfaz se a API
+// devolver erro — nunca confia que a chamada em background deu certo.
+
 async function markUnread() {
   const id = state.selectedEmailId; if (!id) return;
   const le = state.emails.find(e => e.id === id);
+  const wasRead = le ? le.is_read : undefined;
   if (le) { le.is_read = false; _patchEmailItem(id, { is_read: false }); }
   hideEmail(); state.selectedEmailId = null;
-  toast('Marcado como não lido', 'success');
   refreshFolderCounts();
-  api(`/api/emails/${id}/read`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ read: false }),
-  }).catch(() => {});
+  try {
+    const res = await api(`/api/emails/${id}/read`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ read: false }),
+    });
+    if (!res.ok) throw new Error('servidor rejeitou');
+    toast('Marcado como não lido', 'success');
+  } catch (e) {
+    if (le) { le.is_read = wasRead; _patchEmailItem(id, { is_read: wasRead }); }
+    refreshFolderCounts();
+    toast('Erro ao marcar como não lido no servidor — desfeito', 'error');
+  }
 }
 
 async function toggleSpam() {
   const id = state.selectedEmailId; if (!id) return;
-  const btn    = document.getElementById('ev-spam-btn');
-  const isSpam = btn.dataset.isSpam === '1';
+  const btn      = document.getElementById('ev-spam-btn');
+  const isSpam   = btn.dataset.isSpam === '1';
+  const le       = state.emails.find(e => e.id === id);
+  const snapshot = le ? { ...le } : null;
   state.emails = state.emails.filter(e => e.id !== id);
   state.selectedEmailId = null;
   hideEmail(); renderEmailList(); refreshFolderCounts();
-  toast(isSpam ? 'Removido do spam' : 'Marcado como spam', 'success');
-  api(`/api/emails/${id}/spam`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ spam: !isSpam }),
-  }).catch(() => {});
+  try {
+    const res = await api(`/api/emails/${id}/spam`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spam: !isSpam }),
+    });
+    if (!res.ok) throw new Error('servidor rejeitou');
+    toast(isSpam ? 'Removido do spam' : 'Marcado como spam', 'success');
+  } catch (e) {
+    if (snapshot) { state.emails.push(snapshot); renderEmailList(); refreshFolderCounts(); }
+    toast('Erro ao atualizar no servidor — desfeito', 'error');
+  }
 }
 
 async function deleteEmail() {
@@ -258,12 +279,13 @@ async function deleteEmail() {
   if (!confirm('Excluir este e-mail?')) return;
   const id = state.selectedEmailId;
   try {
-    const res = await api(`/api/emails/${id}`, { method: 'DELETE' });
-    if (!res.ok) { toast('Erro ao excluir', 'error'); return; }
+    const res  = await api(`/api/emails/${id}`, { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(data.error || 'Erro ao excluir', 'error'); return; }
     state.emails = state.emails.filter(e => e.id !== id);
     state.selectedEmailId = null;
     hideEmail(); renderEmailList(); refreshFolderCounts();
-    toast('E-mail excluído', 'success');
+    toast(data.warning || 'E-mail excluído', data.warning ? 'info' : 'success');
   } catch(e) {
     toast('Erro ao excluir', 'error');
   }
