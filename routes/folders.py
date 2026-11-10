@@ -1,8 +1,11 @@
 """
 routes/folders.py
-Listagem de pastas IMAP e contagem de e-mails por pasta.
+Listagem de pastas IMAP, contagem de e-mails por pasta e sync incremental
+avulso de uma pasta (disparado ao abrir ela na UI — Fase 2.5 pendente).
 """
-from flask import Blueprint, request, jsonify
+import threading
+
+from flask import Blueprint, request, jsonify, current_app
 
 from database import db, Account, Email, FolderState
 
@@ -52,3 +55,34 @@ def folder_counts():
         result.setdefault(fs.folder, {'total': 0, 'unread': 0})
 
     return jsonify(result)
+
+
+@bp.post('/api/accounts/<int:account_id>/folders/<path:folder>/sync')
+def sync_folder(account_id, folder):
+    """Sync incremental avulso de uma pasta — disparado quando o usuário
+    abre ela na UI, pra não depender só do ciclo de poll (Fase 2.5)."""
+    Account.query.get_or_404(account_id)
+    app = current_app._get_current_object()
+    ms = _ms()
+
+    def run():
+        with app.app_context():
+            account = Account.query.get(account_id)
+            if not account:
+                return
+            ms._emit('sync_start', {'account_id': account_id, 'email': account.email})
+            try:
+                result = ms.sync_folder_incremental(account, folder)
+            except Exception as e:
+                ms._emit('sync_error', {'account_id': account_id, 'error': str(e)})
+                return
+            if not result.get('ok'):
+                ms._emit('sync_error', {'account_id': account_id, 'error': result.get('error', 'erro desconhecido')})
+                return
+            ms._emit('sync_done', {
+                'account_id': account_id, 'email': account.email,
+                'new': result.get('new', 0), 'flag_changes': result.get('flag_changes', 0),
+            })
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({'ok': True})
