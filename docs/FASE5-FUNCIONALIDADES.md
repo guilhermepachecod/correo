@@ -99,6 +99,27 @@ Substituir o compose atual por um **modal centralizado e grande**:
   sozinho (Gmail faz; Dovecot/Postfix não). Configurável por conta: "Salvar cópia em Enviados".
 - Atalhos: `c` abre novo, `Ctrl+Enter` envia, `Esc` minimiza.
 
+> **Entregue** — ver commits `fase5.2: ...`. Ressalvas, por decisão
+> explícita (risco) ou por ainda não ter sido feito:
+> - **Rascunho automático só grava no `localStorage`, nunca no IMAP/banco.**
+>   Decisão deliberada: gravar via `APPEND` a cada 10s bombardearia contas
+>   em `mail.soft.dev.br` (fail2ban agressivo) com escrita repetida. O
+>   critério de aceite #5 ("rascunho sobrevive a fechar a aba") está coberto
+>   assim mesmo — ao reabrir o app, o rascunho é oferecido de volta
+>   automaticamente. Persistência de verdade no servidor (`role=drafts`,
+>   só ao fechar/minimizar, substituindo o rascunho anterior) ficou de fora.
+> - "Salvar cópia em Enviados" configurável por conta não existe — hoje é
+>   sempre tentado (`role=sent`), já era o comportamento desde a Fase 2.6.
+> - Atalho `c` para abrir novo compose **não foi restaurado** — já tinha
+>   sido removido antes por conflitar com Ctrl+C; não revisitei esse
+>   conflito nesta rodada. `Esc` continua **fechando** (com a confirmação
+>   de rascunho), não minimizando — mudar isso tocaria o handler
+>   compartilhado com os outros modais (contas, filtros) e não parecia
+>   valer o risco agora.
+> - Corrigi de brinde um bug preexistente: digitar `s`/`e`/`j`/`k` dentro
+>   do editor HTML (contenteditable) disparava os atalhos de teclado da
+>   lista de e-mails (estrela, excluir, navegar) por engano.
+
 ---
 
 ## 3. Feeds (RSS/Atom)
