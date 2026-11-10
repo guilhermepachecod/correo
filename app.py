@@ -92,8 +92,9 @@ def create_app() -> Flask:
     from routes.filters  import bp as filters_bp
     from routes.idle     import bp as idle_bp
     from routes.settings import bp as settings_bp
+    from routes.contacts import bp as contacts_bp
 
-    for bp in [auth_bp, accounts_bp, emails_bp, folders_bp, filters_bp, idle_bp, settings_bp]:
+    for bp in [auth_bp, accounts_bp, emails_bp, folders_bp, filters_bp, idle_bp, settings_bp, contacts_bp]:
         app.register_blueprint(bp)
 
     # ── Autenticação e CSRF (toda rota exceto as públicas) ────────────────────
