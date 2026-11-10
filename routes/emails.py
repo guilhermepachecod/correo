@@ -33,6 +33,35 @@ def _sanitized_dict(email: Email) -> dict:
 _VIEW_ROLE = {'all': 'inbox', 'inbox': 'inbox', 'unread': 'inbox', 'sent': 'sent', 'trash': 'trash'}
 
 
+def _apply_view_filter(q, view: str, account_id: int = None):
+    """Aplica o filtro de uma visão unificada (Fase 2.9/5.1) a uma query de
+    Email. Agrega por folder_state.role, não por nome de pasta — funciona
+    com qualquer conta/servidor. Devolve (query, None) ou (None, 'mensagem
+    de erro') se a view não existir."""
+    if view == 'starred':
+        return q.filter(Email.is_starred == True), None  # noqa: E712 — todas as pastas, todas as contas
+    if view not in _VIEW_ROLE:
+        return None, f'view inválida: {view}'
+
+    folder_q = db.session.query(FolderState.account_id, FolderState.folder) \
+                         .filter(FolderState.role == _VIEW_ROLE[view])
+    if account_id:
+        folder_q = folder_q.filter(FolderState.account_id == account_id)
+    by_account = defaultdict(list)
+    for acc_id, folder_name in folder_q.all():
+        by_account[acc_id].append(folder_name)
+    if by_account:
+        q = q.filter(db.or_(*[
+            db.and_(Email.account_id == aid, Email.folder.in_(folders))
+            for aid, folders in by_account.items()
+        ]))
+    else:
+        q = q.filter(db.false())
+    if view == 'unread':
+        q = q.filter(Email.is_read == False)  # noqa: E712
+    return q, None
+
+
 @bp.get('/api/emails')
 def get_emails():
     account_id = request.args.get('account_id', type=int)
@@ -47,27 +76,9 @@ def get_emails():
     if thread_id:  q = q.filter_by(thread_id=thread_id)
 
     if view:
-        if view == 'starred':
-            q = q.filter(Email.is_starred == True)  # noqa: E712 — todas as pastas, todas as contas
-        elif view in _VIEW_ROLE:
-            folder_q = db.session.query(FolderState.account_id, FolderState.folder) \
-                                 .filter(FolderState.role == _VIEW_ROLE[view])
-            if account_id:
-                folder_q = folder_q.filter(FolderState.account_id == account_id)
-            by_account = defaultdict(list)
-            for acc_id, folder_name in folder_q.all():
-                by_account[acc_id].append(folder_name)
-            if by_account:
-                q = q.filter(db.or_(*[
-                    db.and_(Email.account_id == aid, Email.folder.in_(folders))
-                    for aid, folders in by_account.items()
-                ]))
-            else:
-                q = q.filter(db.false())
-            if view == 'unread':
-                q = q.filter(Email.is_read == False)  # noqa: E712
-        else:
-            return jsonify({'error': f'view inválida: {view}'}), 400
+        q, err = _apply_view_filter(q, view, account_id)
+        if err:
+            return jsonify({'error': err}), 400
     else:
         folder = request.args.get('folder', 'INBOX')
         if folder:
@@ -88,6 +99,16 @@ def get_emails():
         'pages':  pag.pages,
         'page':   page,
     })
+
+
+@bp.get('/api/views/counts')
+def view_counts():
+    """Contadores das visões unificadas (Fase 5.1), pra badge na sidebar."""
+    result = {}
+    for view in ('all', 'unread', 'starred'):
+        q, err = _apply_view_filter(Email.query, view)
+        result[view] = {'total': q.count() if not err else 0}
+    return jsonify(result)
 
 
 @bp.get('/api/emails/<int:email_id>')
