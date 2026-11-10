@@ -306,6 +306,7 @@ function replyEmail() {
     to: e.reply_to || e.from_addr,
     subject: e.subject.startsWith('Re:') ? e.subject : `Re: ${e.subject}`,
     body: _quoteBody(e), replyToId: e.id, title: 'Responder',
+    accountId: e.account_id,
   });
 }
 
@@ -316,6 +317,7 @@ function replyAll() {
     cc: [e.to_addr, e.cc_addr].filter(Boolean).join(', '),
     subject: e.subject.startsWith('Re:') ? e.subject : `Re: ${e.subject}`,
     body: _quoteBody(e), replyToId: e.id, title: 'Responder a todos',
+    accountId: e.account_id,
   });
 }
 
@@ -325,6 +327,7 @@ function forwardEmail() {
     subject: e.subject.startsWith('Fwd:') ? e.subject : `Fwd: ${e.subject}`,
     body: `\n\n--- Mensagem encaminhada ---\nDe: ${e.from_addr}\nPara: ${e.to_addr}\nData: ${fmtDateFull(e.date)}\nAssunto: ${e.subject}\n\n${e.body_text || ''}`,
     title: 'Encaminhar',
+    accountId: e.account_id,
   });
 }
 
@@ -334,13 +337,17 @@ function forwardAsAttachment() {
     subject: `Fwd: ${e.subject}`,
     body: `E-mail encaminhado.\n\nOriginal de: ${e.from_addr}\nAssunto: ${e.subject}`,
     title: 'Encaminhar como anexo',
+    accountId: e.account_id,
   });
   toast('Anexe o .eml manualmente se necessário', 'info');
 }
 
 function editAsNew() {
   const e = state.currentEmail; if (!e) return;
-  openCompose({ to: e.to_addr, cc: e.cc_addr, subject: e.subject, body: e.body_text || '', title: 'Editar como nova mensagem' });
+  openCompose({
+    to: e.to_addr, cc: e.cc_addr, subject: e.subject, body: e.body_text || '',
+    title: 'Editar como nova mensagem', accountId: e.account_id,
+  });
 }
 
 function printEmail() {

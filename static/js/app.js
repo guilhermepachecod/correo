@@ -14,8 +14,11 @@ async function init() {
   await loadSettings();  // carrega do banco antes de qualquer outra coisa
   updateSettingsUI();
   _initScrollInfinite();
+  _setupComposeDragDrop();
+  _setupComposeAutocomplete();
   await loadAccounts();
   await loadEmails();
+  resumeDraftIfAny();
 }
 
 // ── Tema ──────────────────────────────────────────────────────────────────────
@@ -162,7 +165,12 @@ function _sendBrowserNotif(subject, from, accountEmail) {
 // ── Atalhos de teclado ────────────────────────────────────────────────────────
 
 document.addEventListener('keydown', e => {
-  const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+  const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)
+    || document.activeElement?.isContentEditable;
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' &&
+      document.getElementById('compose-modal').classList.contains('open')) {
+    e.preventDefault(); sendEmail(); return;
+  }
   if (e.key === 'Escape') { closeCompose(); closeAccountModal(); closeFiltersModal(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); openCompose(); }
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'r' && state.selectedEmailId) { e.preventDefault(); replyEmail(); }
