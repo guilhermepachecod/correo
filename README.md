@@ -54,11 +54,31 @@ já imprime a versão com `$$` escapado quando necessário; use essa.
 |---|---|---|
 | `CORREO_ALLOWED_ORIGINS` | (nenhuma) | Origens permitidas no Socket.IO, separadas por vírgula. Defina com a URL pública (ex.: `https://cypht.soft.dev.br:18443`) em produção. |
 | `CORREO_COOKIE_SECURE` | `false` | `true` quando atrás de HTTPS (Caddy) em produção. |
-| `MAX_EMAILS_PER_ACCOUNT` | `2000` | Limite de mensagens em cache por conta. |
 | `MAX_ACCOUNTS` | `20` | Limite de contas de e-mail cadastradas. |
 | `ATTACHMENTS_DIR` | `/app/database/attachments` | Diretório dos anexos salvos em disco. |
 | `ACCOUNTS_DIR` | `/app/accounts` | Diretório dos arquivos `.conf` de contas. |
 | `CORREO_DATABASE_URI` | `sqlite:////app/database/mail.db` | URI do banco (útil para rodar/testar fora do Docker). |
+| `CORREO_MAX_BODIES_PER_ACCOUNT` | `2000` | Poda o **corpo** (não a mensagem) de contas além desse limite — ver Fase 2.7 abaixo. Nome antigo `MAX_EMAILS_PER_ACCOUNT` ainda funciona como fallback. |
+| `CORREO_BODY_RETENTION_DAYS` | `180` | Idem, por idade da mensagem. |
+| `CORREO_POLL_SECONDS` | `120` | Intervalo de poll das pastas sem IDLE (Enviados/Lixeira/Spam/Rascunhos/Arquivo). A INBOX é push via IDLE, não usa poll. |
+
+### Sincronização (Fase 2)
+
+O motor de sincronização usa **uma conexão IMAP persistente por conta**
+(`services/imap_connection.py`, biblioteca `imapclient`) em vez de abrir uma
+conexão nova a cada operação — é o que evita acionar o fail2ban de servidores
+agressivos. A INBOX usa IDLE (push em tempo real, por UID — nunca número de
+sequência); as demais pastas com papel conhecido (Enviados/Lixeira/Spam/
+Rascunhos/Arquivo) são sincronizadas por poll periódico na mesma conexão.
+
+Exclusão/movimentação são **servidor-primeiro**: o banco local só muda
+depois que o IMAP confirma, e `EXPUNGE` é sempre por UID específico (nunca
+genérico — não apaga mensagens marcadas por outro cliente).
+
+Se uma conta tiver senha errada, a sincronização para completamente e **não
+tenta logar de novo sozinha** (circuit breaker) — editar a conta ou clicar em
+"reconectar" na UI é o único jeito de tentar de novo. Isso é intencional:
+evita contribuir para um ban de IP por tentativas de login repetidas.
 
 ## Rodando
 
