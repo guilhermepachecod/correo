@@ -1,13 +1,18 @@
 """
 routes/emails.py
-Operações sobre e-mails: listagem, leitura, flags, spam,
-exclusão, envio, ações em massa, mover e threads.
+Operações sobre e-mails: listagem (com visões unificadas — Fase 2.9), leitura,
+flags, spam, exclusão, envio, ações em massa, mover e threads.
+
+Ações individuais e em massa são servidor-primeiro (Fase 2.6): o banco local
+só muda depois que o servidor IMAP confirma. Em erro, devolve 502 e não
+mexe no banco — a UI não deve remover o item otimisticamente sem reverter.
 """
 import io
 import threading
+from collections import defaultdict
 from flask import Blueprint, request, jsonify, send_file, abort, current_app
 
-from database import db, Account, Email, Attachment, enforce_email_limit
+from database import db, Account, Email, Attachment, FolderState
 from services.sanitize import sanitize_email_html
 
 bp = Blueprint('emails', __name__)
@@ -25,10 +30,13 @@ def _sanitized_dict(email: Email) -> dict:
 
 # ── Listagem ──────────────────────────────────────────────────────────────────
 
+_VIEW_ROLE = {'all': 'inbox', 'inbox': 'inbox', 'unread': 'inbox', 'sent': 'sent', 'trash': 'trash'}
+
+
 @bp.get('/api/emails')
 def get_emails():
     account_id = request.args.get('account_id', type=int)
-    folder     = request.args.get('folder', 'INBOX')
+    view       = request.args.get('view', '').strip().lower()
     page       = request.args.get('page', 1, type=int)
     per_page   = request.args.get('per_page', 50, type=int)
     search     = request.args.get('search', '').strip()
@@ -36,8 +44,35 @@ def get_emails():
 
     q = Email.query
     if account_id: q = q.filter_by(account_id=account_id)
-    if folder:     q = q.filter_by(folder=folder)
     if thread_id:  q = q.filter_by(thread_id=thread_id)
+
+    if view:
+        if view == 'starred':
+            q = q.filter(Email.is_starred == True)  # noqa: E712 — todas as pastas, todas as contas
+        elif view in _VIEW_ROLE:
+            folder_q = db.session.query(FolderState.account_id, FolderState.folder) \
+                                 .filter(FolderState.role == _VIEW_ROLE[view])
+            if account_id:
+                folder_q = folder_q.filter(FolderState.account_id == account_id)
+            by_account = defaultdict(list)
+            for acc_id, folder_name in folder_q.all():
+                by_account[acc_id].append(folder_name)
+            if by_account:
+                q = q.filter(db.or_(*[
+                    db.and_(Email.account_id == aid, Email.folder.in_(folders))
+                    for aid, folders in by_account.items()
+                ]))
+            else:
+                q = q.filter(db.false())
+            if view == 'unread':
+                q = q.filter(Email.is_read == False)  # noqa: E712
+        else:
+            return jsonify({'error': f'view inválida: {view}'}), 400
+    else:
+        folder = request.args.get('folder', 'INBOX')
+        if folder:
+            q = q.filter_by(folder=folder)
+
     if search:
         like = f'%{search}%'
         q = q.filter(db.or_(
@@ -58,6 +93,8 @@ def get_emails():
 @bp.get('/api/emails/<int:email_id>')
 def get_email(email_id):
     email = Email.query.get_or_404(email_id)
+    if not email.body_cached:
+        _ms().fetch_full_body(email)  # busca corpo sob demanda (Fase 2.7)
     if not email.is_read:
         account = email.account  # carrega antes do commit para evitar DetachedInstanceError
         email.is_read = True
@@ -70,8 +107,12 @@ def get_email(email_id):
 
 @bp.post('/api/emails/<int:email_id>/star')
 def toggle_star(email_id):
-    email = Email.query.get_or_404(email_id)
-    email.is_starred = not email.is_starred
+    email    = Email.query.get_or_404(email_id)
+    account  = email.account
+    starred  = not email.is_starred
+    if not _ms().mark_star_on_server(email, starred, account):
+        return jsonify({'error': 'Falha ao atualizar no servidor IMAP'}), 502
+    email.is_starred = starred
     db.session.commit()
     return jsonify({'starred': email.is_starred})
 
@@ -81,12 +122,12 @@ def set_read(email_id):
     email   = Email.query.get_or_404(email_id)
     account = email.account  # carrega antes do commit
     is_read = request.json.get('read', True)
+    ok = (_ms().mark_read_on_server(email, account) if is_read
+          else _ms().mark_unread_on_server(email, account))
+    if not ok:
+        return jsonify({'error': 'Falha ao atualizar no servidor IMAP'}), 502
     email.is_read = is_read
     db.session.commit()
-    if is_read:
-        _ms().mark_read_on_server(email, account)
-    else:
-        _ms().mark_unread_on_server(email, account)
     return jsonify({'read': email.is_read})
 
 
@@ -96,9 +137,10 @@ def set_spam(email_id):
     account      = email.account
     mark_as_spam = request.json.get('spam', True)
     result       = _ms().set_spam(email, mark_as_spam, account)
-    if result:
-        db.session.refresh(email)
-    return jsonify({'ok': result, 'folder': email.folder})
+    if not result.get('ok'):
+        return jsonify(result), 502
+    db.session.refresh(email)
+    return jsonify({'ok': True, 'folder': email.folder})
 
 
 # ── Delete / Move ─────────────────────────────────────────────────────────────
@@ -107,23 +149,23 @@ def set_spam(email_id):
 def delete_email(email_id):
     email   = Email.query.get_or_404(email_id)
     account = email.account  # carrega antes de qualquer delete/commit
-    _ms().delete_email(email, account)
-    for att in email.attachments:
-        att.delete_from_disk()
-    db.session.delete(email)
-    db.session.commit()
-    return jsonify({'ok': True})
+    result  = _ms().delete_email(email, account)
+    if not result.get('ok'):
+        return jsonify(result), 502
+    return jsonify(result)
 
 
 @bp.post('/api/emails/<int:email_id>/move')
 def move_email(email_id):
-    email   = Email.query.get_or_404(email_id)
-    folder  = request.json.get('folder')
+    email  = Email.query.get_or_404(email_id)
+    folder = request.json.get('folder')
     if not folder:
         return jsonify({'error': 'folder obrigatório'}), 400
     account = email.account
-    _ms().move_email(email, folder, account)
-    return jsonify({'ok': True})
+    result  = _ms().move_email(email, folder, account)
+    if not result.get('ok'):
+        return jsonify(result), 502
+    return jsonify(result)
 
 
 # ── Send ──────────────────────────────────────────────────────────────────────
@@ -148,16 +190,10 @@ def send_email():
     return jsonify(result)
 
 
-# ── Bulk ──────────────────────────────────────────────────────────────────────
+# ── Bulk (Fase 2.6 — sempre em lote por conta/pasta, nunca EXPUNGE genérico) ──
 
 @bp.post('/api/emails/bulk')
 def bulk_action():
-    """
-    Executa ações em massa com UMA única conexão IMAP por pasta.
-    Agrupa todos os UIDs e manda em um único comando — evita bloqueio no servidor.
-    """
-    import imaplib
-    from collections import defaultdict
     data       = request.json
     action     = data.get('action')
     ids        = data.get('ids', [])
@@ -177,99 +213,94 @@ def bulk_action():
     if not emails:
         return jsonify({'ok': True, 'count': 0})
 
-    # Agrupa por (account_id, folder) — uma conexão IMAP por grupo
+    # Agrupa por (account_id, folder) — um único comando IMAP por grupo
     groups = defaultdict(list)
     for email in emails:
         groups[(email.account_id, email.folder)].append(email)
 
-    count = 0
+    count, errors = 0, []
 
     for (acc_id, fldr), group in groups.items():
         acc  = group[0].account
-        uids = [str(e.uid) for e in group if e.uid]
+        uids = [e.uid for e in group if e.uid]
         if not uids:
             continue
-        uid_set  = ','.join(uids)
-        is_gmail = 'gmail' in (acc.imap_host or '').lower()
+        ids_in_group = [e.id for e in group]
 
         try:
-            from services.imap_pool import pool, connection
-            pool.register(acc)
+            caps = ms._capabilities(acc)
 
             if action == 'mark_read':
-                with connection(acc_id) as conn:
-                    conn.select(f'"{fldr}"')
-                    conn.uid('store', uid_set, '+FLAGS', '\\Seen')
-                db.session.query(Email).filter(
-                    Email.id.in_([e.id for e in group])
-                ).update({'is_read': True}, synchronize_session=False)
+                ms._safe_exec(acc, lambda c: (c.select_folder(fldr, readonly=False), c.add_flags(uids, ['\\Seen'])))
+                Email.query.filter(Email.id.in_(ids_in_group)).update({'is_read': True}, synchronize_session=False)
                 db.session.commit()
                 count += len(group)
 
             elif action == 'mark_unread':
-                with connection(acc_id) as conn:
-                    conn.select(f'"{fldr}"')
-                    conn.uid('store', uid_set, '-FLAGS', '\\Seen')
-                db.session.query(Email).filter(
-                    Email.id.in_([e.id for e in group])
-                ).update({'is_read': False}, synchronize_session=False)
+                ms._safe_exec(acc, lambda c: (c.select_folder(fldr, readonly=False), c.remove_flags(uids, ['\\Seen'])))
+                Email.query.filter(Email.id.in_(ids_in_group)).update({'is_read': False}, synchronize_session=False)
                 db.session.commit()
                 count += len(group)
 
             elif action == 'delete':
-                trash = ms.find_folder(acc, ['trash', 'deleted', 'lixeira'])
-                with connection(acc_id) as conn:
-                    conn.select(f'"{fldr}"')
-                    if trash and fldr.lower() != trash.lower():
-                        try:
-                            if is_gmail:
-                                conn.uid('move', uid_set, f'"{trash}"')
-                            else:
-                                conn.uid('copy', uid_set, f'"{trash}"')
-                                conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
-                                conn.expunge()
-                        except Exception:
-                            conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
-                            conn.expunge()
-                    else:
-                        conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
-                        conn.expunge()
-                for e in group:
-                    for att in e.attachments:
-                        att.delete_from_disk()
-                db.session.query(Email).filter(
-                    Email.id.in_([e.id for e in group])
-                ).delete(synchronize_session=False)
-                db.session.commit()
-                count += len(group)
+                trash = ms.role_folder(acc, 'trash')
+                has_move, has_uidplus = 'MOVE' in caps, 'UIDPLUS' in caps
+                if trash and fldr != trash:
+                    def _op(c, _uids=uids, _trash=trash):
+                        c.select_folder(fldr, readonly=False)
+                        if has_move:
+                            c.move(_uids, _trash)
+                        else:
+                            c.copy(_uids, _trash)
+                            c.add_flags(_uids, ['\\Deleted'])
+                            if has_uidplus:
+                                c.uid_expunge(_uids)
+                    ms._safe_exec(acc, _op)
+                    Email.query.filter(Email.id.in_(ids_in_group)).update({'folder': trash}, synchronize_session=False)
+                    db.session.commit()
+                    count += len(group)
+                else:
+                    def _op(c, _uids=uids):
+                        c.select_folder(fldr, readonly=False)
+                        c.add_flags(_uids, ['\\Deleted'])
+                        if has_uidplus:
+                            c.uid_expunge(_uids)
+                    ms._safe_exec(acc, _op)
+                    if has_uidplus:
+                        for e in group:
+                            for att in e.attachments:
+                                att.delete_from_disk()
+                        Email.query.filter(Email.id.in_(ids_in_group)).delete(synchronize_session=False)
+                        db.session.commit()
+                        count += len(group)
+                    # sem UIDPLUS: fica só flagado \Deleted no servidor, sem
+                    # remover localmente (nunca EXPUNGE genérico — bug B7)
 
             elif action in ('mark_spam', 'mark_not_spam'):
-                target = ms.find_folder(acc, ['spam', 'junk']) if action == 'mark_spam' else 'INBOX'
-                if target and fldr.lower() != target.lower():
-                    with connection(acc_id) as conn:
-                        conn.select(f'"{fldr}"')
-                        try:
-                            if is_gmail:
-                                conn.uid('move', uid_set, f'"{target}"')
-                            else:
-                                conn.uid('copy', uid_set, f'"{target}"')
-                                conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
-                                conn.expunge()
-                        except Exception:
-                            conn.uid('store', uid_set, '+FLAGS', '\\Deleted')
-                            conn.expunge()
-                    db.session.query(Email).filter(
-                        Email.id.in_([e.id for e in group])
-                    ).update({'folder': target}, synchronize_session=False)
+                target = ms.role_folder(acc, 'junk') if action == 'mark_spam' else (ms.role_folder(acc, 'inbox') or 'INBOX')
+                if target and fldr != target:
+                    has_move, has_uidplus = 'MOVE' in caps, 'UIDPLUS' in caps
+                    def _op(c, _uids=uids, _target=target):
+                        c.select_folder(fldr, readonly=False)
+                        if has_move:
+                            c.move(_uids, _target)
+                        else:
+                            c.copy(_uids, _target)
+                            c.add_flags(_uids, ['\\Deleted'])
+                            if has_uidplus:
+                                c.uid_expunge(_uids)
+                    ms._safe_exec(acc, _op)
+                    Email.query.filter(Email.id.in_(ids_in_group)).update({'folder': target}, synchronize_session=False)
                     db.session.commit()
                     count += len(group)
 
         except Exception as e:
             log.warning(f'bulk {action} error (acc={acc_id} folder={fldr}): {e}')
+            errors.append(f'{acc.email}/{fldr}: {e}')
             try: db.session.rollback()
             except Exception: pass
 
-    return jsonify({'ok': True, 'count': count})
+    return jsonify({'ok': count > 0 or not errors, 'count': count, 'errors': errors})
 
 
 # ── Threads ───────────────────────────────────────────────────────────────────
@@ -319,6 +350,9 @@ def search_imap(account_id):
 
 @bp.post('/api/accounts/<int:account_id>/enforce-limit')
 def run_enforce_limit(account_id):
+    """Poda manual de corpos (Fase 2.7) — mesma função que roda automaticamente
+    depois de cada sync incremental. Nome da rota mantido por compatibilidade."""
     Account.query.get_or_404(account_id)
-    removed = enforce_email_limit(account_id)
-    return jsonify({'ok': True, 'removed': removed})
+    from services.mail_service import prune_old_bodies
+    removed = prune_old_bodies(account_id)
+    return jsonify({'ok': True, 'pruned': removed})
