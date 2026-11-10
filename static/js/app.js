@@ -3,13 +3,14 @@
 // ── Sessão ────────────────────────────────────────────────────────────────────
 
 async function logout() {
-  try { await fetch('/api/logout', { method: 'POST' }); } catch (e) {}
+  try { await api('/api/logout', { method: 'POST' }); } catch (e) {}
   window.location.href = '/login';
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
+  await initAuth();      // busca o token CSRF antes de qualquer chamada mutável
   await loadSettings();  // carrega do banco antes de qualquer outra coisa
   updateSettingsUI();
   _startAutoSync();
@@ -141,7 +142,7 @@ function _startAutoSync() {
 async function _silentSyncAll() {
   for (const acc of state.accounts) {
     if (!state.syncErrors[acc.id] && !state.syncingIds.has(acc.id))
-      await fetch(`/api/accounts/${acc.id}/sync`, { method: 'POST' });
+      await api(`/api/accounts/${acc.id}/sync`, { method: 'POST' });
   }
 }
 

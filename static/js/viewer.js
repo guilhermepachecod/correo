@@ -42,7 +42,7 @@ async function openEmail(id) {
   }
 
   // Busca dados completos em background
-  const email = await (await fetch(`/api/emails/${id}`)).json();
+  const email = await (await api(`/api/emails/${id}`)).json();
 
   // Se o usuário trocou de e-mail enquanto carregava, ignora
   if (state.selectedEmailId !== id) return;
@@ -100,7 +100,7 @@ async function openEmail(id) {
 async function openThread(email) {
   if (!email.thread_id) { openEmail(email.id); return; }
   const params = new URLSearchParams({ account_id: state.selectedAccountId });
-  const data   = await (await fetch(`/api/threads/${encodeURIComponent(email.thread_id)}?${params}`)).json();
+  const data   = await (await api(`/api/threads/${encodeURIComponent(email.thread_id)}?${params}`)).json();
   if (!data.length)  { openEmail(email.id); return; }
   if (data.length === 1) { openEmail(data[0].id); return; }
 
@@ -141,7 +141,7 @@ async function openThread(email) {
 
   for (const e of data) {
     if (!e.is_read) {
-      fetch(`/api/emails/${e.id}/read`, {
+      api(`/api/emails/${e.id}/read`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ read: true }),
       });
@@ -218,7 +218,7 @@ function closeMobileViewer() {
 
 async function toggleStar() {
   const id = state.selectedEmailId; if (!id) return;
-  const data = await (await fetch(`/api/emails/${id}/star`, { method: 'POST' })).json();
+  const data = await (await api(`/api/emails/${id}/star`, { method: 'POST' })).json();
   const btn  = document.getElementById('ev-star-btn');
   btn.textContent = data.starred ? '★ Marcado' : '☆ Marcar';
   btn.style.color = data.starred ? 'var(--amber)' : '';
@@ -233,7 +233,7 @@ async function markUnread() {
   hideEmail(); state.selectedEmailId = null;
   toast('Marcado como não lido', 'success');
   refreshFolderCounts();
-  fetch(`/api/emails/${id}/read`, {
+  api(`/api/emails/${id}/read`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ read: false }),
   }).catch(() => {});
@@ -247,7 +247,7 @@ async function toggleSpam() {
   state.selectedEmailId = null;
   hideEmail(); renderEmailList(); refreshFolderCounts();
   toast(isSpam ? 'Removido do spam' : 'Marcado como spam', 'success');
-  fetch(`/api/emails/${id}/spam`, {
+  api(`/api/emails/${id}/spam`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ spam: !isSpam }),
   }).catch(() => {});
@@ -258,7 +258,7 @@ async function deleteEmail() {
   if (!confirm('Excluir este e-mail?')) return;
   const id = state.selectedEmailId;
   try {
-    const res = await fetch(`/api/emails/${id}`, { method: 'DELETE' });
+    const res = await api(`/api/emails/${id}`, { method: 'DELETE' });
     if (!res.ok) { toast('Erro ao excluir', 'error'); return; }
     state.emails = state.emails.filter(e => e.id !== id);
     state.selectedEmailId = null;

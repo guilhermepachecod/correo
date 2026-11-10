@@ -82,7 +82,7 @@ async function loadEmails(append = false) {
       const params = new URLSearchParams({ folder, page: state.currentPage, per_page: PER_PAGE });
       if (accountId) params.set('account_id', String(accountId));
       if (state.searchQuery) params.set('search', state.searchQuery);
-      const data = await (await fetch(`/api/emails?${params}`)).json();
+      const data = await (await api(`/api/emails?${params}`)).json();
       all = all.concat(data.emails);
       if (data.page < data.pages) anyHasMore = true;
     }
@@ -265,7 +265,7 @@ function _patchEmailItem(emailId, changes) {
 
 async function quickStar(e, id) {
   e.stopPropagation();
-  const data = await (await fetch(`/api/emails/${id}/star`, { method: 'POST' })).json();
+  const data = await (await api(`/api/emails/${id}/star`, { method: 'POST' })).json();
   const le = state.emails.find(x => x.id === id);
   if (le) { le.is_starred = data.starred; _patchEmailItem(id, { is_starred: data.starred }); }
   if (state.selectedEmailId === id) {
@@ -309,7 +309,7 @@ async function bulkAction(action) {
   // Para delete/spam, aguarda confirmação do servidor antes de remover da UI
   if (['delete', 'mark_spam'].includes(action)) {
     try {
-      const res = await fetch('/api/emails/bulk', {
+      const res = await api('/api/emails/bulk', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
       });
@@ -331,7 +331,7 @@ async function bulkAction(action) {
   renderEmailList();
   refreshFolderCounts();
   toast(`${L[action]}: ${ids.length} e-mail(s)`, 'success');
-  fetch('/api/emails/bulk', {
+  api('/api/emails/bulk', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, ids, folder: state.selectedFolder, account_id: state.selectedAccountId }),
   }).catch(() => {});
@@ -361,7 +361,7 @@ async function bulkActionAll(action) {
   let totalDone = 0, hasError = false;
   for (const folder of folders) {
     try {
-      const res = await fetch('/api/emails/bulk', {
+      const res = await api('/api/emails/bulk', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, ids: [], folder, account_id: accountId }),
       });
@@ -400,7 +400,7 @@ async function searchOnServer() {
   state.imapSearchActive = true;
   _setImapSearchUI(true);
   for (const folder of folders) {
-    await fetch(`/api/accounts/${state.selectedAccountId}/search-imap`, {
+    await api(`/api/accounts/${state.selectedAccountId}/search-imap`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: state.searchQuery, folder }),
     });
@@ -422,7 +422,7 @@ async function syncAll() {
   btn.classList.add('spinning');
   // Sync manual — não derruba o IDLE, só pede fetch de novos e-mails
   for (const acc of state.accounts) {
-    fetch(`/api/accounts/${acc.id}/sync`, { method: 'POST' }).catch(() => {});
+    api(`/api/accounts/${acc.id}/sync`, { method: 'POST' }).catch(() => {});
   }
   // UI recarrega via socket sync_done; fallback após 8s
   setTimeout(() => btn.classList.remove('spinning'), 8000);
@@ -432,7 +432,7 @@ async function syncCurrent() {
   const btn = document.getElementById('sync-btn');
   btn.classList.add('spinning');
   if (state.selectedAccountId) {
-    fetch(`/api/accounts/${state.selectedAccountId}/sync`, { method: 'POST' }).catch(() => {});
+    api(`/api/accounts/${state.selectedAccountId}/sync`, { method: 'POST' }).catch(() => {});
   }
   setTimeout(() => btn.classList.remove('spinning'), 5000);
 }

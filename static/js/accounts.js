@@ -58,7 +58,7 @@ function matchFolderDef(folderName) {
 // ── Carregamento ──────────────────────────────────────────────────────────────
 
 async function loadAccounts() {
-  const res = await fetch('/api/accounts');
+  const res = await api('/api/accounts');
   state.accounts = await res.json();
   renderComposeAccountSelect();
   renderAccountList();
@@ -70,7 +70,7 @@ async function loadAllFolderCounts() {
   folderCountsData = {};
   await Promise.all(state.accounts.map(async acc => {
     try {
-      const res = await fetch(`/api/folders/counts?account_id=${acc.id}`);
+      const res = await api(`/api/folders/counts?account_id=${acc.id}`);
       folderCountsData[acc.id] = await res.json();
     } catch(e) { folderCountsData[acc.id] = {}; }
   }));
@@ -139,7 +139,7 @@ function renderAccountTree() {
         state.authFailed.delete(acc.id);
         state.syncErrors[acc.id] = null;
         renderAccountTree();
-        fetch(`/api/accounts/${acc.id}/idle-restart`, { method: 'POST' });
+        api(`/api/accounts/${acc.id}/idle-restart`, { method: 'POST' });
       };
       header.appendChild(retryBtn);
     }
@@ -286,7 +286,7 @@ function editAccount(id) {
 
 async function deleteAccount(id) {
   if (!confirm('Remover esta conta? Os e-mails serão mantidos.')) return;
-  await fetch(`/api/accounts/${id}`, { method: 'DELETE' });
+  await api(`/api/accounts/${id}`, { method: 'DELETE' });
   if (state.selectedAccountId === id) state.selectedAccountId = null;
   await loadAccounts(); loadEmails(); toast('Conta removida', 'success');
 }
@@ -294,7 +294,7 @@ async function deleteAccount(id) {
 async function purgeAccount(id) {
   const a = state.accounts.find(x => x.id === id);
   if (!confirm(`Limpar "${a?.name}"? Remove conta E TODOS OS E-MAILS permanentemente.`)) return;
-  await fetch(`/api/accounts/${id}/purge`, { method: 'DELETE' });
+  await api(`/api/accounts/${id}/purge`, { method: 'DELETE' });
   if (state.selectedAccountId === id) { state.selectedAccountId = null; hideEmail(); }
   await loadAccounts(); loadEmails(); toast('Conta e e-mails removidos', 'success');
 }
@@ -328,12 +328,12 @@ async function saveAccount() {
     toast('Preencha todos os campos obrigatórios', 'error'); return;
   }
   const res = state.editAccountId
-    ? await fetch(`/api/accounts/${state.editAccountId}`, {
+    ? await api(`/api/accounts/${state.editAccountId}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data) })
     : (() => {
         if (!data.password) { toast('Senha obrigatória para nova conta', 'error'); return null; }
-        return fetch('/api/accounts', {
+        return api('/api/accounts', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data) });
       })();
@@ -354,7 +354,7 @@ async function testAccount() {
   btn.textContent = 'Testando...'; btn.disabled = true;
   try {
     if (state.editAccountId) {
-      const r = await (await fetch(`/api/accounts/${state.editAccountId}/test`, { method: 'POST' })).json();
+      const r = await (await api(`/api/accounts/${state.editAccountId}/test`, { method: 'POST' })).json();
       r.ok ? toast('✓ Conexão bem-sucedida!', 'success') : toast(r.errors.join(' | '), 'error');
     } else {
       const data = {
@@ -370,14 +370,14 @@ async function testAccount() {
         smtp_ssl: document.getElementById('af-smtp-ssl').checked,
         smtp_tls: document.getElementById('af-smtp-tls').checked,
       };
-      const cr = await fetch('/api/accounts', {
+      const cr = await api('/api/accounts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data) });
       if (!cr.ok) { toast('Preencha todos os campos para testar', 'error'); return; }
       const acc = await cr.json();
-      const r = await (await fetch(`/api/accounts/${acc.id}/test`, { method: 'POST' })).json();
+      const r = await (await api(`/api/accounts/${acc.id}/test`, { method: 'POST' })).json();
       r.ok ? toast('✓ Conexão bem-sucedida!', 'success') : toast(r.errors.join(' | '), 'error');
-      await fetch(`/api/accounts/${acc.id}`, { method: 'DELETE' });
+      await api(`/api/accounts/${acc.id}`, { method: 'DELETE' });
       await loadAccounts();
     }
   } finally {
@@ -389,7 +389,7 @@ async function syncConf() {
   const btn = document.getElementById('sync-conf-btn');
   btn.disabled = true; btn.textContent = '⟳ Sincronizando...';
   try {
-    const data = await (await fetch('/api/accounts/sync-conf', { method: 'POST' })).json();
+    const data = await (await api('/api/accounts/sync-conf', { method: 'POST' })).json();
     const parts = [];
     if (data.created.length) parts.push(`${data.created.length} criada(s)`);
     if (data.updated.length) parts.push(`${data.updated.length} atualizada(s)`);

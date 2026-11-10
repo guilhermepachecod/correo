@@ -27,7 +27,7 @@ async function loadFilters() {
   if (!accountId) return;
   _loadFolderOptionsForFilter(accountId);
   try {
-    const filters = await (await fetch(`/api/accounts/${accountId}/filters`)).json();
+    const filters = await (await api(`/api/accounts/${accountId}/filters`)).json();
     _renderFilterList(filters, accountId);
   } catch(e) { toast('Erro ao carregar filtros', 'error'); }
 }
@@ -77,7 +77,7 @@ function _renderFilterList(filters, accountId) {
 }
 
 async function toggleFilter(id, enabled, btn) {
-  await fetch(`/api/filters/${id}`, {
+  await api(`/api/filters/${id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
   });
@@ -135,10 +135,10 @@ async function saveFilter() {
   };
   try {
     const res = _editFilterId
-      ? await fetch(`/api/filters/${_editFilterId}`, {
+      ? await api(`/api/filters/${_editFilterId}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload) })
-      : await fetch(`/api/accounts/${accountId}/filters`, {
+      : await api(`/api/accounts/${accountId}/filters`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload) });
     if (res.ok) { toast('Filtro salvo!', 'success'); closeFilterForm(); loadFilters(); }
@@ -148,7 +148,7 @@ async function saveFilter() {
 
 async function deleteFilter(id) {
   if (!confirm('Remover este filtro?')) return;
-  await fetch(`/api/filters/${id}`, { method: 'DELETE' });
+  await api(`/api/filters/${id}`, { method: 'DELETE' });
   toast('Filtro removido', 'success');
   loadFilters();
 }

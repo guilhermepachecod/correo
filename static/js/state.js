@@ -48,7 +48,7 @@ const settings = {
 async function loadSettings() {
   // Carrega do banco (servidor) — sincroniza entre dispositivos
   try {
-    const res = await fetch('/api/settings');
+    const res = await api('/api/settings');
     if (res.ok) {
       const data = await res.json();
       // Converte valores string de volta para os tipos corretos
@@ -75,7 +75,7 @@ function saveSettings() {
   // Salva no localStorage (collapsedAccounts — específico por dispositivo)
   localStorage.setItem('correo_settings', JSON.stringify({ collapsedAccounts: settings.collapsedAccounts }));
   // Salva no banco (preferências globais)
-  fetch('/api/settings', {
+  api('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

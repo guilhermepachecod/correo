@@ -117,7 +117,7 @@ async function sendEmail() {
   for (const f of state.attachments) fd.append('attachments', f);
 
   try {
-    const data = await (await fetch('/api/emails/send', { method: 'POST', body: fd })).json();
+    const data = await (await api('/api/emails/send', { method: 'POST', body: fd })).json();
     if (data.ok) { toast('E-mail enviado!', 'success'); closeCompose(); }
     else toast(`Erro: ${data.error}`, 'error');
   } catch(e) {

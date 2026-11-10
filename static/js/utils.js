@@ -1,5 +1,46 @@
 // utils.js — funções puras, zero dependências externas
 
+// ── API (fetch único) ──────────────────────────────────────────────────────
+// TODA chamada a /api/* no frontend DEVE passar por api(), nunca por fetch()
+// direto — é o único lugar que injeta o header X-Correo-CSRF em métodos
+// mutáveis e trata sessão expirada (401 → /login).
+// tests/test_no_raw_fetch.py falha o build se aparecer fetch( fora daqui.
+
+let _csrfToken = null;
+
+function setCsrfToken(token) { _csrfToken = token; }
+
+async function api(url, opts = {}) {
+  const init = Object.assign({}, opts);
+  const method = (init.method || 'GET').toUpperCase();
+  const isMutating = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method);
+
+  if (isMutating && url.startsWith('/api/') && url !== '/api/login' && _csrfToken) {
+    const headers = new Headers(init.headers || {});
+    headers.set('X-Correo-CSRF', _csrfToken);
+    init.headers = headers;
+  }
+
+  const res = await fetch(url, init);
+
+  if (res.status === 401 && url !== '/api/login' && url !== '/api/me') {
+    window.location.href = '/login';
+  }
+  return res;
+}
+
+// Busca o token CSRF da sessão atual. Chamado uma vez no início de init()
+// (app.js), antes de qualquer chamada mutável.
+async function initAuth() {
+  try {
+    const res = await api('/api/me');
+    if (res.ok) {
+      const data = await res.json();
+      setCsrfToken(data.csrf || null);
+    }
+  } catch (e) { /* offline — próximas chamadas tratam o erro via 401 */ }
+}
+
 function esc(str) {
   if (!str) return '';
   return String(str)
