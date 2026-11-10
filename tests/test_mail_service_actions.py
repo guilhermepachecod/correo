@@ -35,6 +35,12 @@ class RecordingClient:
     def uid_expunge(self, uids):
         self.calls.append(('uid_expunge', tuple(uids)))
 
+    def capabilities(self):
+        # Só é chamado se _capabilities() decidir rebuscar ao vivo (cache
+        # vazio) — devolve vazio pra manter os testes de 'sem UIDPLUS'
+        # consistentes mesmo se isso acontecer.
+        return []
+
     def expunge(self):
         # Nunca deve ser chamado — é o bug B7 (apaga \Deleted de outro cliente).
         raise AssertionError('expunge() genérico chamado — regressão do bug B7')

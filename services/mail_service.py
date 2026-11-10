@@ -25,13 +25,14 @@ from imapclient import IMAPClient
 
 from database import db, Email, Attachment, EmailFilter, Account, FolderState, \
     resolve_thread_id, BODY_RETENTION_DAYS, MAX_BODIES_PER_ACCOUNT
-from services.imap_connection import manager as conn_manager, AuthCircuitOpen
+from services.imap_connection import manager as conn_manager, AuthCircuitOpen, get_capabilities
 from services.email_parser import parse_email_from_raw
 from services.special_folders import detect_role
 
 log = logging.getLogger(__name__)
 
-BATCH_SIZE = 50
+BATCH_SIZE = 50         # mensagens completas (corpo) por lote de fetch
+FLAGS_BATCH_SIZE = 200  # só FLAGS é bem mais leve — lote maior sem problema
 
 
 def _flag_str(flag) -> str:
@@ -103,12 +104,26 @@ class MailService:
             db.session.commit()
 
     def _capabilities(self, account: Account) -> set:
-        if not account.capabilities:
-            return set()
+        """Lê a CAPABILITY cacheada; se nunca foi cacheada (ou o cache veio
+        vazio), busca na conexão persistente já aberta — sem login novo —
+        em vez de assumir 'sem UIDPLUS' e silenciosamente nunca expurgar
+        nada. Era essa suposição errada que fazia 'excluir' parar de
+        funcionar (ficava só flagando \\Deleted sem nunca confirmar) em
+        contas cuja capability ainda não tinha sido cacheada."""
+        if account.capabilities:
+            try:
+                cached = set(json.loads(account.capabilities))
+                if cached:
+                    return cached
+            except Exception:
+                pass
         try:
-            return set(json.loads(account.capabilities))
-        except Exception:
+            caps = self._safe_exec(account, lambda c: get_capabilities(c))
+        except Exception as e:
+            log.warning(f'_capabilities fetch error {account.email}: {e}')
             return set()
+        self._on_capabilities(account.id, caps)
+        return caps
 
     # ── Test ──────────────────────────────────────────────────────────────────
 
@@ -266,16 +281,20 @@ class MailService:
             try:
                 data = self._safe_exec(account, lambda c: c.fetch(batch, ['FLAGS', 'BODY.PEEK[]']))
             except Exception as e:
+                # Um lote falhando (ex.: pasta com milhares de mensagens,
+                # comando longo demais pro servidor) não pode travar o
+                # resto — continua tentando os próximos lotes.
                 log.warning(f'sync_folder_incremental fetch error {account.email}/{folder}: {e}')
-                break
+                continue
             new_count += self._save_fetched(account, folder, data)
 
         flag_changes = 0
         check_uids = sorted(existing_uids & all_uids)
-        if check_uids:
+        for i in range(0, len(check_uids), FLAGS_BATCH_SIZE):
+            batch = check_uids[i:i + FLAGS_BATCH_SIZE]
             try:
-                flag_data = self._safe_exec(account, lambda c: c.fetch(check_uids, ['FLAGS']))
-                flag_changes = self._apply_flag_updates(account, folder, flag_data, existing_rows)
+                flag_data = self._safe_exec(account, lambda c: c.fetch(batch, ['FLAGS']))
+                flag_changes += self._apply_flag_updates(account, folder, flag_data, existing_rows)
             except Exception as e:
                 log.warning(f'sync_folder_incremental flags error {account.email}/{folder}: {e}')
 
