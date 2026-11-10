@@ -20,6 +20,33 @@
       <button id="sync-all-btn" onclick="syncAll()" title="Sincronizar tudo">↻</button>
     </div>
 
+    <div id="unified-views">
+      <div class="unified-view-item" data-view="all" onclick="selectUnifiedView('all')">
+        <span class="folder-icon">📥</span>
+        <span class="folder-name">Todos</span>
+        <span class="folder-badge" id="view-badge-all" style="display:none"></span>
+      </div>
+      <div class="unified-view-item" data-view="unread" onclick="selectUnifiedView('unread')">
+        <span class="folder-icon">✉</span>
+        <span class="folder-name">Não lidos</span>
+        <span class="folder-badge" id="view-badge-unread" style="display:none"></span>
+      </div>
+      <div class="unified-view-item" data-view="starred" onclick="selectUnifiedView('starred')">
+        <span class="folder-icon">★</span>
+        <span class="folder-name">Com estrela</span>
+        <span class="folder-badge" id="view-badge-starred" style="display:none"></span>
+      </div>
+      <div class="unified-view-item" data-view="sent" onclick="selectUnifiedView('sent')">
+        <span class="folder-icon">📤</span>
+        <span class="folder-name">Enviados</span>
+      </div>
+      <div class="unified-view-item" data-view="trash" onclick="selectUnifiedView('trash')">
+        <span class="folder-icon">🗑</span>
+        <span class="folder-name">Lixeira</span>
+      </div>
+    </div>
+    <div class="sidebar-divider" style="margin:4px 8px;"></div>
+
     <div id="account-tree"></div>
 
     <div id="sidebar-footer">

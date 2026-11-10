@@ -70,6 +70,12 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .folder-icon { font-size:11px; flex-shrink:0; width:14px; text-align:center; }
 .folder-name { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .folder-badge { background:var(--bg4); color:var(--text); border-radius:99px; font-size:10px; font-weight:600; padding:1px 5px; min-width:16px; text-align:center; flex-shrink:0; }
+#unified-views { padding:4px 0; flex-shrink:0; }
+.unified-view-item { display:flex; align-items:center; gap:6px; padding:4px 8px; cursor:pointer; color:var(--text); font-size:12px; font-weight:500; transition:background var(--trans); border-radius:4px; margin:1px 4px; height:var(--row-h); }
+.unified-view-item:hover { background:var(--bg3); }
+.unified-view-item.active { background:var(--accent); color:#fff; }
+.unified-view-item.active .folder-badge { background:rgba(255,255,255,0.3); }
+.ei-account-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; margin-left:2px; }
 #sidebar-footer { border-top:1px solid var(--line); padding:6px 8px 8px; flex-shrink:0; }
 .sidebar-action { display:flex; align-items:center; gap:7px; padding:5px 8px; border-radius:4px; cursor:pointer; color:var(--muted); font-size:12px; transition:all var(--trans); }
 .sidebar-action:hover { background:var(--bg3); color:var(--text); }

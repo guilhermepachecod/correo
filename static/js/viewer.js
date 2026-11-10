@@ -11,6 +11,9 @@ async function openEmail(id) {
   // Marca como lido na lista imediatamente
   const le = state.emails.find(e => e.id === id);
   if (le) { le.is_read = true; _patchEmailItem(id, { is_read: true }); }
+  // Na visão "Não lidos", ler uma mensagem a remove da lista (ela continua
+  // aberta no painel de leitura, só sai da lista à esquerda)
+  if (state.currentView === 'unread') _dropFromList(id);
 
   // Mostra painel imediatamente com dados da lista (que já temos)
   document.getElementById('reading-empty').style.display = 'none';

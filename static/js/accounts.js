@@ -63,6 +63,7 @@ async function loadAccounts() {
   renderComposeAccountSelect();
   renderAccountList();
   await loadAllFolderCounts();
+  await refreshViewCounts();
   renderAccountTree();
 }
 
@@ -78,7 +79,50 @@ async function loadAllFolderCounts() {
 
 async function refreshFolderCounts() {
   await loadAllFolderCounts();
+  await refreshViewCounts();
   renderAccountTree();
+}
+
+// ── Visões unificadas (Fase 5.1) ───────────────────────────────────────────────
+
+function selectUnifiedView(view) {
+  state.currentView         = view;
+  state.selectedAccountId   = null;
+  state.selectedFolder      = null;
+  state.selectedFolderReals = null;
+  state.selectedEmailId     = null;
+  state.selectedIds.clear();
+  state.currentPage         = 1;
+  state.searchQuery         = '';
+  state.imapSearchActive    = false;
+  const si = document.getElementById('search-input');
+  if (si) si.value = '';
+  hideEmail();
+  renderAccountTree();
+  renderUnifiedViews();
+  loadEmails();
+}
+
+function renderUnifiedViews() {
+  document.querySelectorAll('.unified-view-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.view === state.currentView);
+  });
+}
+
+async function refreshViewCounts() {
+  try {
+    const data = await (await api('/api/views/counts')).json();
+    state.viewCounts = data;
+  } catch (e) { return; }
+  const setBadge = (id, n) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = n || '';
+    el.style.display = n > 0 ? '' : 'none';
+  };
+  setBadge('view-badge-all',     state.viewCounts.all?.total     || 0);
+  setBadge('view-badge-unread',  state.viewCounts.unread?.total  || 0);
+  setBadge('view-badge-starred', state.viewCounts.starred?.total || 0);
 }
 
 // ── Árvore de contas ──────────────────────────────────────────────────────────
@@ -196,6 +240,7 @@ function renderAccountTree() {
   if (!state.accounts.length) {
     container.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px;">Nenhuma conta. Clique em ⚙ Gerenciar contas.</div>';
   }
+  renderUnifiedViews();
 }
 
 function toggleAccountCollapse(accId, node) {
@@ -209,6 +254,7 @@ function toggleAccountCollapse(accId, node) {
 // ── Seleção de pasta ──────────────────────────────────────────────────────────
 
 function selectFolder(accountId, folderKey, realFolders) {
+  state.currentView         = null;
   state.selectedAccountId   = accountId;
   state.selectedFolder      = folderKey;
   state.selectedFolderReals = realFolders;
