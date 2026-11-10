@@ -188,21 +188,30 @@
 <!-- ══ COMPOSE MODAL ══ -->
 <div id="compose-modal">
   <div id="compose-box">
-    <div id="compose-header">
+    <div id="compose-header" onclick="restoreComposeIfMinimized()">
       <span id="compose-title">Nova mensagem</span>
       <div class="compose-mode-tabs">
-        <button class="compose-tab active" id="tab-plain" onclick="setComposeMode('plain')">Texto</button>
-        <button class="compose-tab" id="tab-html" onclick="setComposeMode('html')">HTML</button>
+        <button class="compose-tab active" id="tab-plain" onclick="event.stopPropagation(); setComposeMode('plain')">Texto</button>
+        <button class="compose-tab" id="tab-html" onclick="event.stopPropagation(); setComposeMode('html')">HTML</button>
       </div>
-      <button id="compose-close" onclick="closeCompose()">×</button>
+      <button id="compose-minimize" title="Minimizar" onclick="event.stopPropagation(); minimizeCompose()">—</button>
+      <button id="compose-maximize-btn" title="Maximizar" onclick="event.stopPropagation(); toggleComposeMaximize()">🗖</button>
+      <button id="compose-close" onclick="event.stopPropagation(); closeCompose()">×</button>
     </div>
     <div id="compose-fields">
       <div class="compose-field">
         <span class="compose-label">De</span>
         <select id="compose-account-select" style="flex:1;background:var(--bg3);border:1px solid var(--line);border-radius:4px;color:var(--text);font-family:var(--font);font-size:12px;padding:4px 7px;outline:none;"></select>
       </div>
-      <div class="compose-field"><span class="compose-label">Para</span><input class="compose-input" id="compose-to" type="text" placeholder="destinatario@email.com"></div>
-      <div class="compose-field"><span class="compose-label">Cc</span><input class="compose-input" id="compose-cc" type="text"></div>
+      <div class="compose-field">
+        <span class="compose-label">Para</span>
+        <input class="compose-input" id="compose-to" type="text" placeholder="destinatario@email.com" autocomplete="off">
+        <span id="compose-ccbcc-toggle" onclick="toggleCcBcc()">Cc/Cco</span>
+      </div>
+      <div id="compose-ccbcc-wrap" style="display:none">
+        <div class="compose-field"><span class="compose-label">Cc</span><input class="compose-input" id="compose-cc" type="text" autocomplete="off"></div>
+        <div class="compose-field"><span class="compose-label">Cco</span><input class="compose-input" id="compose-bcc" type="text" autocomplete="off"></div>
+      </div>
       <div class="compose-field"><span class="compose-label">Assunto</span><input class="compose-input" id="compose-subject" type="text" placeholder="Assunto"></div>
     </div>
     <div id="compose-body-wrap">

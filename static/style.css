@@ -199,22 +199,36 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .thread-msg-body { padding:14px; font-size:13px; line-height:1.7; }
 
 /* ── Compose modal ── */
-#compose-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); backdrop-filter:blur(4px); z-index:100; align-items:flex-end; justify-content:flex-end; padding:20px; }
+#compose-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); backdrop-filter:blur(4px); z-index:100; align-items:center; justify-content:center; padding:20px; }
 #compose-modal.open { display:flex; }
-#compose-box { background:var(--bg2); border:1px solid var(--line); border-radius:var(--radius); width:580px; max-height:80vh; display:flex; flex-direction:column; box-shadow:0 24px 80px var(--shadow); }
-#compose-header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
-#compose-title  { font-size:13px; font-weight:500; flex:1; }
-#compose-close  { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:17px; padding:2px 5px; border-radius:4px; }
-#compose-close:hover { color:var(--text); }
+#compose-box { background:var(--bg2); border:1px solid var(--line); border-radius:var(--radius); width:min(1100px,92vw); height:min(860px,90vh); display:flex; flex-direction:column; box-shadow:0 24px 80px var(--shadow); transition:background var(--trans); }
+#compose-box.drag-over { background:color-mix(in srgb,var(--accent) 10%,var(--bg2)); outline:2px dashed var(--accent); outline-offset:-4px; }
+#compose-box.maximized { width:100vw; height:100vh; border-radius:0; }
+/* Minimizado: vira uma barra no canto, só o header visível e clicável */
+#compose-modal.minimized { align-items:flex-end; justify-content:flex-end; background:transparent; backdrop-filter:none; pointer-events:none; padding:16px; }
+#compose-modal.minimized #compose-box { pointer-events:auto; width:280px; height:auto; box-shadow:0 8px 30px var(--shadow); }
+#compose-modal.minimized #compose-fields,
+#compose-modal.minimized #compose-body-wrap,
+#compose-modal.minimized #compose-html-wrap,
+#compose-modal.minimized #compose-footer { display:none !important; }
+#compose-modal.minimized #compose-header { cursor:pointer; border-bottom:none; }
+#compose-header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; flex-shrink:0; }
+#compose-title  { font-size:13px; font-weight:500; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#compose-close, #compose-minimize, #compose-maximize-btn { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:14px; padding:2px 7px; border-radius:4px; line-height:1.6; }
+#compose-close { font-size:17px; }
+#compose-close:hover, #compose-minimize:hover, #compose-maximize-btn:hover { color:var(--text); background:var(--bg3); }
 .compose-mode-tabs { display:flex; gap:4px; }
 .compose-tab { background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 8px; cursor:pointer; }
 .compose-tab.active { border-color:var(--accent); color:var(--accent); }
-#compose-fields { padding:12px 16px; display:flex; flex-direction:column; gap:7px; border-bottom:1px solid var(--line); }
+#compose-fields { padding:12px 16px; display:flex; flex-direction:column; gap:7px; border-bottom:1px solid var(--line); flex-shrink:0; }
 .compose-field  { display:flex; align-items:center; gap:10px; }
 .compose-label  { font-size:11px; color:var(--muted); width:28px; flex-shrink:0; }
 .compose-input  { flex:1; background:transparent; border:none; border-bottom:1px solid var(--line); color:var(--text); font-family:var(--font); font-size:12px; padding:4px 0; outline:none; transition:border-color var(--trans); }
 .compose-input:focus { border-bottom-color:var(--accent); }
-#compose-body-wrap { flex:1; overflow:hidden; display:flex; flex-direction:column; }
+#compose-ccbcc-toggle { font-size:11px; color:var(--accent); cursor:pointer; flex-shrink:0; user-select:none; }
+#compose-ccbcc-toggle:hover { text-decoration:underline; }
+#compose-ccbcc-wrap { display:flex; flex-direction:column; gap:7px; }
+#compose-body-wrap { flex:1; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
 #compose-body { flex:1; background:transparent; border:none; color:var(--text); font-family:var(--font); font-size:13px; line-height:1.7; padding:12px 16px; resize:none; outline:none; min-height:160px; }
 #compose-html-wrap { flex:1; flex-direction:column; min-height:0; }
 #compose-toolbar { padding:6px 10px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:4px; flex-wrap:wrap; background:var(--bg3); }
@@ -224,14 +238,20 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .ced-select { background:var(--bg3); border:1px solid var(--line); border-radius:3px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 4px; }
 .ced-color { width:24px; height:22px; border:1px solid var(--line); border-radius:3px; cursor:pointer; padding:0; background:transparent; }
 #compose-editor { flex:1; padding:12px 16px; outline:none; font-family:var(--font); font-size:13px; line-height:1.7; overflow-y:auto; min-height:120px; color:var(--text); }
-#compose-footer { padding:8px 16px; border-top:1px solid var(--line); display:flex; align-items:center; gap:8px; }
+#compose-footer { padding:8px 16px; border-top:1px solid var(--line); display:flex; align-items:center; gap:8px; flex-shrink:0; flex-wrap:wrap; }
 #compose-send-btn { background:var(--accent); border:none; color:#fff; border-radius:5px; padding:7px 18px; font-family:var(--font); font-size:12px; font-weight:500; cursor:pointer; }
 #compose-send-btn:hover { opacity:.85; }
 .compose-attach-btn { background:transparent; border:1px solid var(--line); color:var(--muted); border-radius:5px; padding:6px 10px; font-family:var(--font); font-size:11px; cursor:pointer; }
 .compose-attach-btn:hover { border-color:var(--accent); color:var(--accent); }
 #compose-attach-list { display:flex; flex-wrap:wrap; gap:5px; flex:1; }
 .compose-att { background:var(--bg3); border-radius:4px; padding:2px 7px; font-size:11px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+.compose-att-size { color:var(--muted); opacity:.7; }
 .compose-att-remove { cursor:pointer; color:var(--red); font-size:11px; }
+
+/* ── Autocomplete de destinatários ── */
+.recipient-suggest { background:var(--bg2); border:1px solid var(--line); border-radius:var(--radius); box-shadow:0 8px 24px var(--shadow); z-index:300; max-height:180px; overflow-y:auto; }
+.recipient-suggest-item { padding:6px 10px; font-size:12px; color:var(--text); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.recipient-suggest-item:hover, .recipient-suggest-item.active { background:var(--accent); color:#fff; }
 
 /* ── Account modal ── */
 #account-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.65); backdrop-filter:blur(4px); z-index:200; align-items:center; justify-content:center; }
