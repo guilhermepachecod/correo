@@ -5,7 +5,12 @@ Trabalhe em fases, na ordem, com commits pequenos por item. Não pule fases.
 
 > **Status:** Fase 1 (segurança) entregue e em `main`, incluindo as pendências
 > encontradas no primeiro deploy real (ver `docs/FASE5-FUNCIONALIDADES.md`,
-> seção 0). Fase 2 (sincronização) é a próxima — ver seção 8 (Ordem de entrega).
+> seção 0). Fase 2.1-2.3 (modelo de dados, conexão IMAP persistente, pastas
+> especiais) entregue em `main` — ver nota em cada subseção. **Importante:**
+> 2.2 (`services/imap_connection.py`) só foi testado com mocks de
+> `imapclient.IMAPClient`, nunca contra um servidor IMAP real, e ainda não
+> está conectado a `idle_manager.py`/`mail_service.py` — isso é a 2.4/2.5,
+> próximo passo (ver seção 8).
 
 ---
 
@@ -147,12 +152,12 @@ templates/index.html
 
 ---
 
-## 4. Fase 2 — Reescrita do núcleo de sincronização ⏳ próxima
+## 4. Fase 2 — Reescrita do núcleo de sincronização ⏳ em andamento (2.1-2.3 ✅, 2.4+ pendente)
 
 Reescrever `services/mail_service.py` (parte de sync/ações), `services/idle_manager.py`
 e `services/imap_pool.py`. Usar a biblioteca **`imapclient`** no lugar de `imaplib` cru.
 
-### 2.1 Modelo de dados
+### 2.1 Modelo de dados ✅
 Criar sistema de migração versionado simples (tabela `schema_version` + lista ordenada
 de funções), substituindo `_run_migrations` com `try/except pass`.
 
@@ -164,7 +169,11 @@ Novas estruturas:
   Mapear `is_starred` ⇄ `\Flagged`.
 - `accounts`: `auth_error` (texto nullable), `auth_error_at`, `capabilities` (texto).
 
-### 2.2 Gerenciador de conexões (resolve B8)
+> Entregue em `database.py` (`run_migrations`, `FolderState`) — ver commit
+> `fase2.1: ...`. `uidvalidity`/`uidnext`/`highestmodseq` e o mapeamento
+> `is_starred` ⇄ `\Flagged` ainda não são escritos por nada — isso é a 2.4.
+
+### 2.2 Gerenciador de conexões (resolve B8) — fundação entregue, ainda não conectada
 - Por conta: **uma conexão de comandos persistente** protegida por `threading.Lock`,
   reaproveitada por sync e ações; NOOP periódico; reconexão com backoff exponencial
   (2s, 4s, 8s… máx 5 min).
@@ -175,11 +184,27 @@ Novas estruturas:
 - Limite total de conexões simultâneas por conta: 2.
 - Ler e guardar `CAPABILITY` (IDLE, MOVE, UIDPLUS, CONDSTORE, QRESYNC, SPECIAL-USE).
 
-### 2.3 Pastas especiais (resolve B10)
+> Entregue como módulo novo `services/imap_connection.py`
+> (`AccountConnection`/`ConnectionManager`, ver commit `fase2.2: ...`):
+> conexão persistente + lock, circuit breaker de autenticação (nunca
+> relogar sozinho após falha de auth), `next_backoff()`, capabilities.
+> **Ainda não ligado a `idle_manager.py`/`mail_service.py`** (que continuam
+> no `imap_pool.py` atual, sem mudança de comportamento) — isso é a 2.4/2.5.
+> A conexão IDLE dedicada e o semáforo de 2 conexões/conta também são 2.5.
+> Testado só com `imapclient.IMAPClient` mockado — **nunca contra um
+> servidor IMAP real** (sem acesso a um neste ambiente de trabalho).
+
+### 2.3 Pastas especiais (resolve B10) ✅
 - Detectar via `LIST` com atributos SPECIAL-USE (`\Trash`, `\Sent`, `\Drafts`, `\Junk`, `\Archive`).
 - Fallback por nome (`Trash`, `Lixeira`, `Deleted`, `[Gmail]/Lixeira`, `Sent`, `Enviados`, `E-mails enviados`, `Spam`, `Junk`, `Drafts`, `Rascunhos`, `Archive`).
 - Gravar em `folder_state.role`. Expor na API para a UI (`/api/accounts/<id>/folders` com `role`).
 - Se não existir lixeira, a exclusão é definitiva (com confirmação na UI).
+
+> Entregue: `services/special_folders.py` (`detect_role`) +
+> `MailService.refresh_folder_roles` (usa o `imap_pool` atual, sem mudar o
+> algoritmo de sync) + `GET /api/accounts/<id>/folders` devolvendo
+> `[{name, role}]`. "Exclusão definitiva se não existir lixeira" ainda não
+> implementado — depende das ações servidor-primeiro (2.6).
 
 ### 2.4 Algoritmo de sync incremental por pasta (resolve B2, B3, B5, B6, B9)
 Para cada pasta sincronizada:
@@ -312,8 +337,14 @@ cypht.soft.dev.br:18443 {
 ## 8. Ordem de entrega
 
 1. Fase 1 completa (segurança) → commit(s) → app sobe com login. **✅ entregue.**
-2. Fase 2.1 a 2.3 (modelo, conexões, pastas especiais). **← próximo passo**
-3. Fase 2.4 e 2.5 (sync incremental e IDLE).
+2. Fase 2.1 a 2.3 (modelo, conexões, pastas especiais). **✅ entregue** — ver
+   nota em cada subseção da seção 4. `imap_connection.py` existe mas ainda
+   não está ligado a nada; sync em produção não mudou de comportamento.
+3. Fase 2.4 e 2.5 (sync incremental e IDLE). **← próximo passo.** É a parte
+   de maior risco (troca o algoritmo de sync de verdade, liga o
+   `imap_connection.py`) — pedir validação contra uma conta real antes do
+   push, já que não há servidor IMAP real disponível neste ambiente para
+   testar.
 4. Fase 2.6 e 2.7 (ações servidor-primeiro e poda de corpo).
 5. Fase 2.8 e 2.9 (concorrência e visões unificadas).
 6. Fase 3 (testes) — escrever junto com cada item quando possível.
