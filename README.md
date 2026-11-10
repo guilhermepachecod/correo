@@ -62,9 +62,18 @@ já imprime a versão com `$$` escapado quando necessário; use essa.
 
 ## Rodando
 
+O container roda como usuário não-root `correo` (UID/GID fixos em **1000**).
+Os volumes montados (`database/`, `accounts/`, `attachments/`) precisam ser
+graváveis por esse UID **antes** do primeiro `up`:
+
 ```bash
+mkdir -p database accounts attachments
+chown -R 1000:1000 database accounts attachments
 docker compose up --build
 ```
+
+Sem isso, o gunicorn sobe mas falha ao gravar no SQLite/anexos/`.conf`
+(erro de permissão nos logs do container).
 
 Acesse `http://localhost:15002` — a primeira tela é o login
 (`CORREO_USER` / senha correspondente a `CORREO_PASSWORD_HASH`).
