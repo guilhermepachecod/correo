@@ -44,6 +44,7 @@ const settings = {
   splitSize:           320,
   collapsedAccounts:   {},
   browserNotifications: false,
+  startupView:         'last',    // 'last'|'all'|'unread'|'starred' — visão ao abrir o app
 };
 
 async function loadSettings() {
@@ -61,6 +62,7 @@ async function loadSettings() {
       if (data.splitSize)            settings.splitSize            = parseInt(data.splitSize) || 320;
       if (data.browserNotifications !== undefined)
         settings.browserNotifications = data.browserNotifications.toLowerCase() === 'true';
+      if (data.startupView)          settings.startupView          = data.startupView;
     }
   } catch(e) {}
   // Fallback: localStorage para preferências locais (collapsedAccounts etc)
@@ -84,6 +86,7 @@ function saveSettings() {
       defaultEmailViewMode: settings.defaultEmailViewMode || 'html',
       splitSize:            settings.splitSize,
       browserNotifications: settings.browserNotifications,
+      startupView:          settings.startupView || 'last',
     }),
   }).catch(() => {});
 }

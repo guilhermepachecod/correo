@@ -10,7 +10,7 @@ bp = Blueprint('settings', __name__)
 ALLOWED_KEYS = {
     'theme', 'layout', 'showImagesByDefault',
     'defaultEmailViewMode', 'splitSize',
-    'browserNotifications',
+    'browserNotifications', 'startupView',
 }
 
 

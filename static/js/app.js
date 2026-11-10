@@ -17,8 +17,17 @@ async function init() {
   _setupComposeDragDrop();
   _setupComposeAutocomplete();
   await loadAccounts();
-  await loadEmails();
+  if (settings.startupView && settings.startupView !== 'last') {
+    selectUnifiedView(settings.startupView);
+  } else {
+    await loadEmails();
+  }
   resumeDraftIfAny();
+}
+
+function setStartupView(view) {
+  settings.startupView = view;
+  saveSettings();
 }
 
 // ── Tema ──────────────────────────────────────────────────────────────────────
@@ -104,6 +113,8 @@ window.addEventListener('resize', applySplit);
 function updateSettingsUI() {
   applyTheme(); applyLayout();
   _updateNotifButton();
+  const startupSel = document.getElementById('startup-view-select');
+  if (startupSel) startupSel.value = settings.startupView || 'last';
 
   // Atualiza toggles de preferências de e-mail
   const imgBtn  = document.getElementById('pref-images-btn');
@@ -164,20 +175,46 @@ function _sendBrowserNotif(subject, from, accountEmail) {
 
 // ── Atalhos de teclado ────────────────────────────────────────────────────────
 
+let _gChordPending = false, _gChordTimer = null;
+
 document.addEventListener('keydown', e => {
   const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)
     || document.activeElement?.isContentEditable;
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' &&
-      document.getElementById('compose-modal').classList.contains('open')) {
+  const composeOpen = document.getElementById('compose-modal').classList.contains('open');
+
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && composeOpen) {
     e.preventDefault(); sendEmail(); return;
   }
-  if (e.key === 'Escape') { closeCompose(); closeAccountModal(); closeFiltersModal(); }
+  if (e.key === 'Escape') {
+    if (composeOpen && !document.getElementById('compose-modal').classList.contains('minimized')
+        && _hasDraftContent()) {
+      minimizeCompose();
+    } else {
+      closeCompose();
+    }
+    closeAccountModal(); closeFiltersModal();
+  }
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); openCompose(); }
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'r' && state.selectedEmailId) { e.preventDefault(); replyEmail(); }
   if ((e.ctrlKey || e.metaKey) && e.shiftKey  && e.key === 'R' && state.selectedEmailId) { e.preventDefault(); replyAll(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'l' && state.selectedEmailId) { e.preventDefault(); forwardEmail(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'p' && state.selectedEmailId) { e.preventDefault(); printEmail(); }
   if (!inInput) {
+    // Atalho composto "g" + (a|u|s) — visões unificadas (Fase 5.1)
+    if (_gChordPending) {
+      _gChordPending = false; clearTimeout(_gChordTimer);
+      if (e.key === 'a') { e.preventDefault(); selectUnifiedView('all');     return; }
+      if (e.key === 'u') { e.preventDefault(); selectUnifiedView('unread');  return; }
+      if (e.key === 's') { e.preventDefault(); selectUnifiedView('starred'); return; }
+      // qualquer outra tecla cancela o chord e segue o fluxo normal abaixo
+    }
+    if (e.key === 'g' && !e.ctrlKey && !e.metaKey) {
+      _gChordPending = true;
+      clearTimeout(_gChordTimer);
+      _gChordTimer = setTimeout(() => { _gChordPending = false; }, 600);
+      return;
+    }
+    if (e.key === 'c' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openCompose(); }
     if (e.key === 'j') _navigateEmail('next');
     if (e.key === 'k') _navigateEmail('prev');
     if (e.key === 'u') { hideEmail(); state.selectedEmailId = null; }
