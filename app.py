@@ -38,7 +38,7 @@ def create_app() -> Flask:
 
     app.config.update(
         SECRET_KEY=_require_secret('CORREO_SECRET_KEY'),
-        SQLALCHEMY_DATABASE_URI='sqlite:////app/database/mail.db',
+        SQLALCHEMY_DATABASE_URI=os.environ.get('CORREO_DATABASE_URI', 'sqlite:////app/database/mail.db'),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SQLALCHEMY_ENGINE_OPTIONS={
             'connect_args': {
@@ -48,7 +48,7 @@ def create_app() -> Flask:
             'poolclass': __import__('sqlalchemy.pool', fromlist=['NullPool']).NullPool,
         },
         MAX_CONTENT_LENGTH=25 * 1024 * 1024,
-        ACCOUNTS_DIR=str(Path('/app/accounts')),
+        ACCOUNTS_DIR=os.environ.get('ACCOUNTS_DIR', '/app/accounts'),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE='Lax',
         SESSION_COOKIE_SECURE=cookie_secure,
