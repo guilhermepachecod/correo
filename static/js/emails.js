@@ -409,20 +409,41 @@ async function bulkActionAll(action) {
   }
   state.selectedIds.clear();
   _updateEmailCountBar();
-  toast(`Processando ${count} e-mail(s)...`, 'info');
+  toast(`Processando ${count} e-mail(s) em segundo plano...`, 'info');
 
-  // Confirma no servidor — usa variáveis capturadas, não state
+  // "Pasta inteira" roda em background no servidor (pode ser milhares de
+  // mensagens — não pode travar a requisição HTTP, senão o navegador vê
+  // erro de conexão mesmo quando o servidor termina certinho). O
+  // resultado real chega pelo evento bulk_done; o listener precisa estar
+  // registrado ANTES de disparar os requests, pra não perder um evento
+  // que volte rápido demais.
+  const pending = new Set(folders);
   let totalDone = 0, hasError = false;
+
+  const waitForCompletion = new Promise(resolve => {
+    const handler = d => {
+      if (d.account_id !== accountId || d.action !== action || !pending.has(d.folder)) return;
+      pending.delete(d.folder);
+      totalDone += d.count || 0;
+      if (!d.ok || (d.errors || []).length) hasError = true;
+      if (pending.size === 0) { socket.off('bulk_done', handler); resolve(); }
+    };
+    socket.on('bulk_done', handler);
+    // Salvaguarda — nunca espera pra sempre se algo não voltar
+    setTimeout(() => { socket.off('bulk_done', handler); resolve(); }, 5 * 60 * 1000);
+  });
+
   for (const folder of folders) {
     try {
       const res = await api('/api/emails/bulk', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, ids: [], folder, account_id: accountId }),
       });
-      if (res.ok) { const d = await res.json(); totalDone += d.count || 0; }
-      else hasError = true;
-    } catch(e) { hasError = true; }
+      if (!res.ok) { pending.delete(folder); hasError = true; }
+    } catch(e) { pending.delete(folder); hasError = true; }
   }
+
+  if (pending.size > 0) await waitForCompletion;
 
   // Recarrega lista e contagens reais
   await loadEmails();

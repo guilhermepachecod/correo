@@ -111,6 +111,17 @@ def view_counts():
     return jsonify(result)
 
 
+@bp.get('/api/emails/<int:email_id>/source')
+def get_email_source(email_id):
+    """Fonte bruta da mensagem (headers + corpo) direto do IMAP — ex.: ver
+    'Received' pra checar se o servidor de envio está vazando IP real."""
+    email  = Email.query.get_or_404(email_id)
+    source = _ms().fetch_raw_source(email)
+    if source is None:
+        return jsonify({'error': 'Não foi possível buscar a fonte da mensagem no servidor'}), 502
+    return jsonify({'ok': True, 'source': source})
+
+
 @bp.get('/api/emails/<int:email_id>')
 def get_email(email_id):
     email = Email.query.get_or_404(email_id)
@@ -223,40 +234,17 @@ def _chunks(seq, size):
         yield seq[i:i + size]
 
 
-@bp.post('/api/emails/bulk')
-def bulk_action():
-    data       = request.json
-    action     = data.get('action')
-    ids        = data.get('ids', [])
-    folder     = data.get('folder', 'INBOX')
-    account_id = data.get('account_id')
-    ms         = _ms()
-    log        = current_app.logger
-
-    if ids:
-        emails = Email.query.filter(Email.id.in_(ids)).all()
-    else:
-        q = Email.query.filter_by(folder=folder)
-        if account_id:
-            q = q.filter_by(account_id=account_id)
-        emails = q.all()
-
-    if not emails:
-        return jsonify({'ok': True, 'count': 0})
-
-    # Agrupa por (account_id, folder) — mas o comando IMAP em si sai em
-    # lotes de BULK_IMAP_BATCH UIDs (ver _chunks), nunca tudo de uma vez
-    groups = defaultdict(list)
-    for email in emails:
-        groups[(email.account_id, email.folder)].append(email)
-
+def _process_bulk_groups(ms, groups: dict, action: str, log) -> tuple[int, list]:
+    """Roda a ação em cada grupo (account_id, folder) → {uid: Email|None},
+    em lotes de BULK_IMAP_BATCH UIDs. Compartilhado pelo caminho síncrono
+    (seleção explícita, ids=[...]) e pelo assíncrono (pasta inteira, roda
+    em thread — ver bulk_action). Devolve (count, errors)."""
     count, errors = 0, []
 
-    for (acc_id, fldr), group in groups.items():
-        acc = group[0].account
-        by_uid = {e.uid: e for e in group if e.uid}
+    for (acc_id, fldr), by_uid in groups.items():
         if not by_uid:
             continue
+        acc = Account.query.get(acc_id)
 
         try:
             caps = ms._capabilities(acc)
@@ -271,20 +259,27 @@ def bulk_action():
                   else ms.role_folder(acc, 'inbox') or 'INBOX') if action in ('mark_spam', 'mark_not_spam') else None
 
         for batch_uids in _chunks(list(by_uid.keys()), BULK_IMAP_BATCH):
-            batch_emails = [by_uid[u] for u in batch_uids]
+            # by_uid[u] é None pra UID que existe no servidor mas ainda não
+            # foi sincronizado localmente (ver ramo "pasta inteira" acima) —
+            # o comando IMAP roda sobre todo batch_uids mesmo assim, só o
+            # lado do banco (flags/move/delete local) fica restrito a quem
+            # tem linha local.
+            batch_emails = [e for e in (by_uid[u] for u in batch_uids) if e is not None]
             batch_ids    = [e.id for e in batch_emails]
             try:
                 if action == 'mark_read':
                     ms._safe_exec(acc, lambda c, _u=batch_uids: (c.select_folder(fldr, readonly=False), c.add_flags(_u, ['\\Seen'])))
-                    Email.query.filter(Email.id.in_(batch_ids)).update({'is_read': True}, synchronize_session=False)
-                    db.session.commit()
-                    count += len(batch_emails)
+                    if batch_ids:
+                        Email.query.filter(Email.id.in_(batch_ids)).update({'is_read': True}, synchronize_session=False)
+                        db.session.commit()
+                    count += len(batch_uids)
 
                 elif action == 'mark_unread':
                     ms._safe_exec(acc, lambda c, _u=batch_uids: (c.select_folder(fldr, readonly=False), c.remove_flags(_u, ['\\Seen'])))
-                    Email.query.filter(Email.id.in_(batch_ids)).update({'is_read': False}, synchronize_session=False)
-                    db.session.commit()
-                    count += len(batch_emails)
+                    if batch_ids:
+                        Email.query.filter(Email.id.in_(batch_ids)).update({'is_read': False}, synchronize_session=False)
+                        db.session.commit()
+                    count += len(batch_uids)
 
                 elif action == 'delete':
                     if trash and fldr != trash:
@@ -298,9 +293,10 @@ def bulk_action():
                                 if has_uidplus:
                                     c.uid_expunge(_u)
                         ms._safe_exec(acc, _op)
-                        Email.query.filter(Email.id.in_(batch_ids)).update({'folder': trash}, synchronize_session=False)
-                        db.session.commit()
-                        count += len(batch_emails)
+                        if batch_ids:
+                            Email.query.filter(Email.id.in_(batch_ids)).update({'folder': trash}, synchronize_session=False)
+                            db.session.commit()
+                        count += len(batch_uids)
                     else:
                         def _op(c, _u=batch_uids):
                             c.select_folder(fldr, readonly=False)
@@ -312,9 +308,10 @@ def bulk_action():
                             for e in batch_emails:
                                 for att in e.attachments:
                                     att.delete_from_disk()
-                            Email.query.filter(Email.id.in_(batch_ids)).delete(synchronize_session=False)
-                            db.session.commit()
-                            count += len(batch_emails)
+                            if batch_ids:
+                                Email.query.filter(Email.id.in_(batch_ids)).delete(synchronize_session=False)
+                                db.session.commit()
+                            count += len(batch_uids)
                         # sem UIDPLUS: fica só flagado \Deleted no servidor,
                         # sem remover localmente (nunca EXPUNGE genérico — B7)
 
@@ -330,9 +327,10 @@ def bulk_action():
                                 if has_uidplus:
                                     c.uid_expunge(_u)
                         ms._safe_exec(acc, _op)
-                        Email.query.filter(Email.id.in_(batch_ids)).update({'folder': target}, synchronize_session=False)
-                        db.session.commit()
-                        count += len(batch_emails)
+                        if batch_ids:
+                            Email.query.filter(Email.id.in_(batch_ids)).update({'folder': target}, synchronize_session=False)
+                            db.session.commit()
+                        count += len(batch_uids)
 
             except Exception as e:
                 # Um lote falhando não aborta os outros — com milhares de
@@ -342,7 +340,72 @@ def bulk_action():
                 try: db.session.rollback()
                 except Exception: pass
 
-    return jsonify({'ok': count > 0 or not errors, 'count': count, 'errors': errors})
+    return count, errors
+
+
+@bp.post('/api/emails/bulk')
+def bulk_action():
+    """Seleção explícita (ids=[...], bounded pelo que está na tela): roda
+    na hora e devolve o resultado direto. Pasta inteira (ids=[], ex.
+    "apagar todos" numa Lixeira com milhares de mensagens): roda em
+    background e avisa pelo Socket.IO (evento bulk_done) — uma ação dessas
+    pode levar mais que o timeout do gunicorn/proxy se ficar bloqueando a
+    requisição HTTP, e isso fazia a exclusão terminar certinho no servidor
+    mas o navegador receber erro de conexão (0 processado, em vermelho)."""
+    data       = request.json
+    action     = data.get('action')
+    ids        = data.get('ids', [])
+    folder     = data.get('folder', 'INBOX')
+    account_id = data.get('account_id')
+    ms         = _ms()
+    log        = current_app.logger
+
+    if ids:
+        emails = Email.query.filter(Email.id.in_(ids)).all()
+        if not emails:
+            return jsonify({'ok': True, 'count': 0})
+        # Agrupa por (account_id, folder) — mas o comando IMAP em si sai em
+        # lotes de BULK_IMAP_BATCH UIDs (ver _chunks), nunca tudo de uma vez
+        groups = defaultdict(dict)
+        for email in emails:
+            if email.uid:
+                groups[(email.account_id, email.folder)][email.uid] = email
+        count, errors = _process_bulk_groups(ms, groups, action, log)
+        return jsonify({'ok': count > 0 or not errors, 'count': count, 'errors': errors})
+
+    # Pasta inteira — os UIDs vêm direto do servidor, não só do que o sync
+    # local já alcançou, senão uma pasta grande fazia "apagar todos"
+    # parecer concluído mas só afetava as primeiras centenas sincronizadas.
+    if not account_id:
+        return jsonify({'ok': True, 'count': 0})
+    Account.query.get_or_404(account_id)
+    app_obj = current_app._get_current_object()
+
+    def run():
+        with app_obj.app_context():
+            account = Account.query.get(account_id)
+            if not account:
+                return
+            try:
+                live_uids = ms.list_folder_uids(account, folder)
+            except Exception as e:
+                log.warning(f'bulk {action} live UIDs error (acc={account_id} folder={folder}): {e}')
+                ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
+                                       'ok': False, 'count': 0, 'errors': [str(e)]})
+                return
+            if not live_uids:
+                ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
+                                       'ok': True, 'count': 0, 'errors': []})
+                return
+            local_rows = {e.uid: e for e in Email.query.filter_by(account_id=account_id, folder=folder)
+                                                       .filter(Email.uid.in_(live_uids)).all()}
+            groups = {(account_id, folder): {u: local_rows.get(u) for u in live_uids}}
+            count, errors = _process_bulk_groups(ms, groups, action, log)
+            ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
+                                   'ok': count > 0 or not errors, 'count': count, 'errors': errors})
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({'ok': True, 'async': True})
 
 
 # ── Threads ───────────────────────────────────────────────────────────────────

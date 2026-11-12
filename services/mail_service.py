@@ -195,6 +195,16 @@ class MailService:
         db.session.commit()
         return result
 
+    def list_folder_uids(self, account: Account, folder: str) -> list[int]:
+        """UIDs ao vivo no servidor pra essa pasta — usado pelas ações 'toda
+        a pasta' (ids vazio, ex. 'apagar todos'), que não podem ficar
+        limitadas ao que o sync local já alcançou: numa pasta grande
+        (ex.: Lixeira com milhares de mensagens) isso fazia 'apagar todos'
+        parecer que processou tudo mas só afetava as primeiras centenas
+        já sincronizadas."""
+        self._safe_exec(account, lambda c: c.select_folder(folder, readonly=True))
+        return sorted(self._safe_exec(account, lambda c: c.search('ALL')))
+
     def role_folder(self, account: Account, role: str) -> str | None:
         """Pasta com o role dado (ex. 'trash', 'sent', 'junk'). Fallback por
         palavra-chave no nome se refresh_folder_roles ainda não rodou pra
@@ -380,6 +390,25 @@ class MailService:
             'updates': [{'id': eid, **changed} for eid, changed in updates],
         })
         return len(updates)
+
+    def fetch_raw_source(self, email_obj: Email) -> str | None:
+        """Fonte bruta (headers + corpo, como armazenada no servidor) pra
+        diagnóstico — ex.: checar se o 'Received' vaza o IP real do servidor
+        de e-mail. BODY.PEEK[] não marca \\Seen; nada é gravado no banco."""
+        account = email_obj.account
+        try:
+            self._safe_exec(account, lambda c: c.select_folder(email_obj.folder, readonly=True))
+            data = self._safe_exec(account, lambda c: c.fetch([email_obj.uid], ['BODY.PEEK[]']))
+        except Exception as e:
+            log.warning(f'fetch_raw_source error email_id={email_obj.id}: {e}')
+            return None
+        item = data.get(email_obj.uid)
+        if not item:
+            return None
+        raw = item.get(b'BODY[]') or item.get(b'RFC822')
+        if not raw:
+            return None
+        return raw.decode('utf-8', errors='replace')
 
     def fetch_full_body(self, email_obj: Email) -> bool:
         """Poda de corpo (2.7): quando body_cached=false, busca o corpo
