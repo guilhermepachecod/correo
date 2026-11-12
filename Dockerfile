@@ -13,4 +13,4 @@ USER correo
 EXPOSE 15002
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:15002/healthz')" || exit 1
-CMD ["gunicorn", "-w", "1", "--threads", "64", "--access-logfile", "-", "-b", "0.0.0.0:15002", "app:app"]
+CMD ["gunicorn", "-w", "1", "--worker-class", "gthread", "--threads", "64", "--timeout", "120", "--access-logfile", "-", "-b", "0.0.0.0:15002", "app:app"]
