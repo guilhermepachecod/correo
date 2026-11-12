@@ -2,6 +2,15 @@
 Testa services/idle_manager.py (Fase 2.5) com um IMAPClient fake — sem
 servidor real. O ponto mais crítico: falha de autenticação nunca gera
 retry automático (é o que evita o ban do fail2ban em mail.soft.dev.br).
+
+Desde a unificação de conexão (bug real em produção: e-dominios.com.br
+matava com EOF a segunda conexão simultânea por conta), o IDLE passa a usar
+services.imap_connection.manager — o mesmo singleton usado por
+mail_service._safe_exec — em vez de abrir seu próprio IMAPClient. Por isso
+o fake precisa ser injetado em services.imap_connection (não mais em
+idle_manager), e os testes limpam esse singleton global entre execuções
+pra não vazar conexões cacheadas de um teste pro outro (ids de conta podem
+ser reaproveitados entre testes no mesmo banco sqlite de teste).
 """
 import threading
 import time
@@ -9,7 +18,8 @@ import time
 import pytest
 from imapclient.exceptions import LoginError
 
-import services.idle_manager as idle_manager_module
+import services.imap_connection as imap_connection_module
+from services.imap_connection import manager as conn_manager, AuthCircuitOpen
 from app import app
 from database import db, Account
 from services.idle_manager import IMAPIdleManager
@@ -21,9 +31,11 @@ class FakeIdleClient:
     login_calls = 0
     shutdown_calls = 0
     idle_calls = 0
+    instances = 0
 
     def __init__(self, host, port=None, ssl=True, timeout=None):
-        pass
+        FakeIdleClient.instances += 1
+        self.selected = None
 
     def login(self, username, password):
         FakeIdleClient.login_calls += 1
@@ -31,7 +43,11 @@ class FakeIdleClient:
             raise LoginError('AUTHENTICATIONFAILED')
 
     def select_folder(self, folder, readonly=False):
+        self.selected = folder
         return {}
+
+    def capabilities(self):
+        return [b'IMAP4rev1', b'IDLE']
 
     def idle(self):
         FakeIdleClient.idle_calls += 1
@@ -52,8 +68,11 @@ def _reset(monkeypatch):
     FakeIdleClient.login_calls = 0
     FakeIdleClient.shutdown_calls = 0
     FakeIdleClient.idle_calls = 0
-    monkeypatch.setattr(idle_manager_module, 'IMAPClient', FakeIdleClient)
+    FakeIdleClient.instances = 0
+    monkeypatch.setattr(imap_connection_module, 'IMAPClient', FakeIdleClient)
+    conn_manager.close_all()
     yield
+    conn_manager.close_all()
 
 
 def _make_account(email):
@@ -87,7 +106,9 @@ def test_run_session_syncs_inbox_and_emits_status(monkeypatch):
 
         assert sync_calls == ['INBOX']
         assert FakeIdleClient.login_calls == 1
-        assert FakeIdleClient.shutdown_calls == 1
+        # A conexão agora é compartilhada/persistente (services.imap_connection) —
+        # _run_session não a derruba mais ao sair do loop de IDLE.
+        assert FakeIdleClient.shutdown_calls == 0
         assert ('idle_status', {'account_id': acc.id, 'email': acc.email, 'status': 'connected'}) in events
         assert ('idle_status', {'account_id': acc.id, 'email': acc.email, 'status': 'disconnected'}) in events
 
@@ -106,7 +127,7 @@ def test_run_session_auth_failure_opens_circuit_without_sync(monkeypatch):
         im = IMAPIdleManager(ms, app)
         stop = threading.Event()
 
-        with pytest.raises(idle_manager_module.AuthCircuitOpen):
+        with pytest.raises(AuthCircuitOpen):
             im._run_session(acc.id, stop, last_poll=0)
 
         assert sync_calls == []  # nunca chegou a sincronizar
@@ -191,3 +212,59 @@ def test_poll_other_folders_emits_nothing_when_no_changes(monkeypatch):
         im._poll_other_folders(acc)
 
         assert events == []
+
+
+def test_run_session_shares_a_single_connection_with_mail_service(monkeypatch):
+    """Bug real em produção: e-dominios.com.br mata com 'socket error: EOF'
+    uma segunda conexão simultânea por conta. IDLE e sync precisam usar a
+    MESMA conexão (services.imap_connection.manager) — nunca uma segunda
+    aberta só para o IDLE. Aqui simulamos uma sessão completa (conecta,
+    sync inicial, resposta de IDLE dispara resync, poll de outras pastas)
+    sem mockar sync_folder_incremental, pra confirmar que tudo passa pela
+    mesma conexão e só um IMAPClient é criado para a conta inteira."""
+    with app.app_context():
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('idle6@example.com')
+        account_id = acc.id
+
+        ms = MailService(socketio=None)
+        monkeypatch.setattr(ms, 'refresh_folder_roles', lambda account: {})
+        monkeypatch.setattr(ms, 'sync_folders_to_track', lambda account: ['INBOX.Sent'])
+        monkeypatch.setattr(ms, '_emit', lambda event, data: None)
+
+        sync_calls = []
+
+        def fake_sync(account, folder):
+            # Chama _safe_exec de verdade — precisa passar pela MESMA conexão
+            # já aberta pelo IDLE, não abrir uma nova.
+            ms._safe_exec(account, lambda c: c.select_folder(folder, readonly=True))
+            sync_calls.append(folder)
+            return {'ok': True, 'new': 0, 'flag_changes': 0, 'removed': 0}
+
+        monkeypatch.setattr(ms, 'sync_folder_incremental', fake_sync)
+
+        im = IMAPIdleManager(ms, app)
+        im.IDLE_RENEW_SECONDS = 1
+        im.IDLE_CHECK_TIMEOUT = 0
+
+        # Força a 1ª iteração do while a reportar uma "resposta" de IDLE,
+        # disparando um resync, e garante que o poll de outras pastas também
+        # rode dentro da mesma sessão.
+        call_count = {'n': 0}
+
+        def idle_check_once(self, timeout=None):
+            call_count['n'] += 1
+            return [(1, b'EXISTS')] if call_count['n'] == 1 else []
+
+        monkeypatch.setattr(FakeIdleClient, 'idle_check', idle_check_once)
+
+        stop = threading.Event()
+        im._run_session(account_id, stop, last_poll=0)
+
+        # ordem real: sync inicial da INBOX -> poll de outras pastas (já
+        # devido, last_poll=0) -> resync da INBOX disparado pela 1a resposta
+        # fake de IDLE
+        assert sync_calls == ['INBOX', 'INBOX.Sent', 'INBOX']
+        assert FakeIdleClient.login_calls == 1
+        assert FakeIdleClient.instances == 1   # nunca uma segunda conexão

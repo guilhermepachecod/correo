@@ -4,12 +4,16 @@ IDLE por conta (RFC 2177), por UID — Fase 2.5. Nenhuma aritmética de número
 de sequência (bug B3): qualquer resposta não solicitada do IDLE simplesmente
 dispara uma sync incremental por UID da INBOX
 (services.mail_service.sync_folder_incremental). Pastas com role conhecido
-(sent/trash/junk/drafts/archive) são sincronizadas por poll periódico, na
-mesma conexão de comandos persistente usada pelas ações (services.imap_connection).
+(sent/trash/junk/drafts/archive) são sincronizadas por poll periódico.
 
-Cada conta usa até 2 conexões: a dedicada de IDLE (aberta aqui) e a de
-comandos (gerenciada por services.imap_connection, compartilhada com
-sync manual/ações). Falha de autenticação nunca gera retry automático —
+Cada conta usa UMA única conexão IMAP persistente (services.imap_connection),
+compartilhada entre o ciclo de IDLE e qualquer sync/ação (manual, bulk,
+poll de outras pastas) — tudo serializado pelo lock de AccountConnection.
+Antes disso, IDLE abria sua própria conexão separada da conexão de comandos;
+alguns provedores (confirmado em produção: e-dominios.com.br) permitem só
+UMA conexão IMAP simultânea por conta e matam a segunda com "socket error:
+EOF" assim que ela tenta um comando — é exatamente esse bug que motivou
+unificar numa conexão só. Falha de autenticação nunca gera retry automático —
 ver AuthCircuitOpen / MailService._on_auth_error (circuit breaker).
 """
 import logging
@@ -17,7 +21,6 @@ import os
 import threading
 import time
 
-from imapclient import IMAPClient
 from imapclient.exceptions import LoginError
 
 from database import Account
@@ -117,8 +120,11 @@ class IMAPIdleManager:
                 stop.wait(2)
 
     def _run_session(self, account_id: int, stop: threading.Event, last_poll: float) -> float:
-        """Uma 'sessão' = conecta, sincroniza, entra em IDLE até renovar (25min)
-        ou cair. Retorna o novo last_poll (timestamp do último poll de outras
+        """Uma 'sessão' = sincroniza, entra em IDLE até renovar (25min) ou
+        cair, repete. Usa a mesma conexão persistente da conta (services.
+        imap_connection) que sync_folder_incremental/ações já usam — nunca
+        abre uma segunda conexão só para o IDLE (ver docstring do módulo).
+        Retorna o novo last_poll (timestamp do último poll de outras
         pastas) pro loop continuar contando entre sessões."""
         account = Account.query.get(account_id)
         if not account:
@@ -126,14 +132,15 @@ class IMAPIdleManager:
 
         self._ms.refresh_folder_roles(account)
 
-        client = IMAPClient(account.imap_host, port=account.imap_port,
-                            ssl=account.imap_ssl, timeout=30)
+        conn = conn_manager.register(
+            account.id, account.imap_host, account.imap_port, account.imap_ssl,
+            account.username, account.get_password,
+            on_auth_error=self._ms._on_auth_error, on_capabilities=self._ms._on_capabilities,
+        )
+
         try:
-            client.login(account.username, account.get_password())
+            conn.execute(lambda c: c.select_folder('INBOX', readonly=True))
         except LoginError as e:
-            self._ms._on_auth_error(account_id, str(e))
-            try: client.shutdown()
-            except Exception: pass
             raise AuthCircuitOpen(str(e)) from e
 
         self._ms._emit('idle_status', {'account_id': account_id, 'email': account.email, 'status': 'connected'})
@@ -151,15 +158,22 @@ class IMAPIdleManager:
                 self._poll_other_folders(account)
                 last_poll = time.time()
 
-            client.select_folder('INBOX', readonly=True)
             deadline = time.time() + self.IDLE_RENEW_SECONDS
 
-            while not stop.is_set() and time.time() < deadline:
-                client.idle()
+            def idle_cycle(c):
+                # Reseleciona INBOX a cada ciclo: _poll_other_folders roda na
+                # mesma conexão compartilhada e pode ter deixado outra pasta
+                # selecionada — sem isso o IDLE ficaria observando a pasta
+                # errada.
+                c.select_folder('INBOX', readonly=True)
+                c.idle()
                 try:
-                    responses = client.idle_check(timeout=self.IDLE_CHECK_TIMEOUT)
+                    return c.idle_check(timeout=self.IDLE_CHECK_TIMEOUT)
                 finally:
-                    client.idle_done()
+                    c.idle_done()
+
+            while not stop.is_set() and time.time() < deadline:
+                responses = conn.execute(idle_cycle)
 
                 if responses:
                     log.info(f'IDLE {account.email}: {len(responses)} resposta(s), ressincronizando INBOX por UID')
@@ -176,8 +190,6 @@ class IMAPIdleManager:
 
             return last_poll
         finally:
-            try: client.shutdown()
-            except Exception: pass
             self._ms._emit('idle_status', {'account_id': account_id, 'email': account.email, 'status': 'disconnected'})
 
     def _poll_other_folders(self, account: Account) -> None:
