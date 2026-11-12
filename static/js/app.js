@@ -192,7 +192,7 @@ document.addEventListener('keydown', e => {
     } else {
       closeCompose();
     }
-    closeAccountModal(); closeFiltersModal();
+    closeAccountModal(); closeFiltersModal(); closeSource();
   }
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); openCompose(); }
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'r' && state.selectedEmailId) { e.preventDefault(); replyEmail(); }
@@ -237,6 +237,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('filters-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('filters-modal')) closeFiltersModal();
+  });
+  document.getElementById('source-box').addEventListener('click', e => {
+    if (e.target === document.getElementById('source-box')) closeSource();
   });
   init();
 });

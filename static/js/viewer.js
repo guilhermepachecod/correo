@@ -303,6 +303,33 @@ async function deleteEmail() {
   }
 }
 
+// ── Código-fonte / headers brutos ─────────────────────────────────────────────
+
+async function viewSource() {
+  const id = state.selectedEmailId; if (!id) return;
+  const box = document.getElementById('source-box');
+  const pre = document.getElementById('source-pre');
+  pre.textContent = 'Buscando no servidor...';
+  box.classList.add('open');
+  try {
+    const res  = await api(`/api/emails/${id}/source`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { pre.textContent = data.error || 'Erro ao buscar a fonte da mensagem.'; return; }
+    pre.textContent = data.source;
+  } catch (e) {
+    pre.textContent = 'Erro ao buscar a fonte da mensagem.';
+  }
+}
+
+function closeSource() { document.getElementById('source-box').classList.remove('open'); }
+
+async function copySource() {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('source-pre').textContent);
+    toast('Copiado', 'success');
+  } catch (e) { toast('Não foi possível copiar', 'error'); }
+}
+
 // ── Ações de composição a partir do viewer ────────────────────────────────────
 
 function _quoteBody(e) {

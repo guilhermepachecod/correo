@@ -150,6 +150,7 @@
           <button class="ev-btn" onclick="forwardAsAttachment()">📎 Enc. como anexo</button>
           <button class="ev-btn" onclick="editAsNew()">✏ Editar como novo</button>
           <button class="ev-btn" onclick="printEmail()">🖨 Imprimir</button>
+          <button class="ev-btn" onclick="viewSource()">⌁ Código-fonte</button>
           <div class="ev-sep"></div>
           <button class="ev-btn" id="ev-star-btn" onclick="toggleStar()">☆ Marcar</button>
           <button class="ev-btn" onclick="markUnread()">✉ Não lido</button>
@@ -193,6 +194,20 @@
 
   </div><!-- #main-panel -->
 </div><!-- #app -->
+
+<!-- ══ CÓDIGO-FONTE MODAL ══ -->
+<div id="source-box">
+  <div id="source-panel">
+    <div id="source-header">
+      <h2>Código-fonte da mensagem</h2>
+      <div style="display:flex;gap:7px;">
+        <button class="btn btn-ghost" onclick="copySource()">Copiar</button>
+        <button class="compose-close" onclick="closeSource()">×</button>
+      </div>
+    </div>
+    <pre id="source-pre"></pre>
+  </div>
+</div>
 
 <!-- ══ COMPOSE MODAL ══ -->
 <div id="compose-modal">
