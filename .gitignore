@@ -36,3 +36,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Scratch: comandos pra copiar pro dock01, nunca parte do repo
+cmd.txt
