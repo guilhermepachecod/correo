@@ -31,7 +31,13 @@ log = logging.getLogger(__name__)
 
 class IMAPIdleManager:
     IDLE_RENEW_SECONDS = 25 * 60   # RFC 2177 recomenda renovar antes de 29 min
-    IDLE_CHECK_TIMEOUT  = 20        # idle_check bloqueia até esse tempo por ciclo
+    # idle_check bloqueia até esse tempo por ciclo, e segura o lock da conexão
+    # compartilhada (ver docstring do módulo) por esse tempo inteiro — qualquer
+    # ação do usuário (abrir e-mail, marcar como lido) que precise da mesma
+    # conexão fica esperando até o ciclo atual terminar. Curto de propósito:
+    # era 20s antes de virarem 20-30s reais de "carregando" ao clicar num
+    # e-mail bem no meio de um ciclo de IDLE.
+    IDLE_CHECK_TIMEOUT  = 2
     RECONNECT_BASE      = 2
     RECONNECT_MAX       = 300
     POLL_SECONDS         = int(os.environ.get('CORREO_POLL_SECONDS', 120))
@@ -187,6 +193,12 @@ class IMAPIdleManager:
                 if time.time() - last_poll >= self.POLL_SECONDS:
                     self._poll_other_folders(account)
                     last_poll = time.time()
+
+                # Folga fora do lock entre ciclos: sem isso, esta própria
+                # thread tende a readquirir o lock antes do escalonador dar
+                # chance a uma thread concorrente esperando por ele (abrir um
+                # e-mail, por exemplo) — threading.Lock não é FIFO.
+                time.sleep(0.05)
 
             return last_poll
         finally:

@@ -218,6 +218,7 @@
         <button class="compose-tab active" id="tab-plain" onclick="event.stopPropagation(); setComposeMode('plain')">Texto</button>
         <button class="compose-tab" id="tab-html" onclick="event.stopPropagation(); setComposeMode('html')">HTML</button>
       </div>
+      <button id="compose-discard" title="Descartar rascunho" onclick="event.stopPropagation(); discardCompose()">🗑</button>
       <button id="compose-minimize" title="Minimizar" onclick="event.stopPropagation(); minimizeCompose()">—</button>
       <button id="compose-maximize-btn" title="Maximizar" onclick="event.stopPropagation(); toggleComposeMaximize()">🗖</button>
       <button id="compose-close" onclick="event.stopPropagation(); closeCompose()">×</button>

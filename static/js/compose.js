@@ -74,9 +74,31 @@ function closeCompose() {
   state.attachments = [];
 }
 
+// Descarta o rascunho de propósito — diferente de closeCompose(), nunca
+// pergunta nem regrava no localStorage (é o único jeito de um rascunho de
+// teste parar de voltar sozinho a cada abertura do correo via resumeDraftIfAny()).
+function discardCompose() {
+  if (_hasDraftContent() && !confirm('Descartar este rascunho? Isso não pode ser desfeito.')) {
+    return;
+  }
+  _suppressDraftOnClose = true;
+  _clearLocalDraft();
+  closeCompose();
+}
+
 // ── Maximizar / minimizar ──────────────────────────────────────────────────────
 
 function toggleComposeMaximize() {
+  const modal = document.getElementById('compose-modal');
+  if (modal.classList.contains('minimized')) {
+    // Minimizado, os botões de maximizar/minimizar só servem pra "trazer de
+    // volta" — não faz sentido também trocar o tamanho que tava antes de
+    // minimizar (bug real: clicar em maximizar minimizado não tinha efeito
+    // nenhum, porque a regra CSS .minimized tem mais especificidade que
+    // .maximized e ignorava a troca de classe).
+    restoreComposeIfMinimized();
+    return;
+  }
   const box = document.getElementById('compose-box');
   const maximized = box.classList.toggle('maximized');
   try { localStorage.setItem('correo_compose_maximized', maximized ? '1' : '0'); } catch (e) {}

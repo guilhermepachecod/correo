@@ -268,3 +268,59 @@ def test_run_session_shares_a_single_connection_with_mail_service(monkeypatch):
         assert sync_calls == ['INBOX', 'INBOX.Sent', 'INBOX']
         assert FakeIdleClient.login_calls == 1
         assert FakeIdleClient.instances == 1   # nunca uma segunda conexão
+
+
+def test_idle_cycle_does_not_block_a_concurrent_command_for_too_long(monkeypatch):
+    """Regressão real reportada pelo usuário: depois da unificação de conexão,
+    abrir um e-mail (ou qualquer ação que use _safe_exec) enquanto o IDLE
+    está no meio de um ciclo passou a demorar 20-30s — porque idle_check
+    segurava o lock da conexão compartilhada pelo IDLE_CHECK_TIMEOUT inteiro
+    (eram 20s). Aqui o idle_check de verdade dorme (bloqueia a thread, não só
+    'parece' bloquear) pelo tempo do timeout configurado, simulando o
+    servidor IMAP não tendo nada a dizer. Uma chamada concorrente de
+    _safe_exec (simulando abrir um e-mail) não pode esperar muito mais que
+    um único ciclo de IDLE_CHECK_TIMEOUT."""
+    with app.app_context():
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('idle7@example.com')
+        account_id = acc.id
+
+        ms = MailService(socketio=None)
+        monkeypatch.setattr(ms, 'refresh_folder_roles', lambda account: {})
+        monkeypatch.setattr(ms, 'sync_folders_to_track', lambda account: [])
+        monkeypatch.setattr(ms, 'sync_folder_incremental',
+                            lambda account, folder: {'ok': True, 'new': 0, 'flag_changes': 0, 'removed': 0})
+        monkeypatch.setattr(ms, '_emit', lambda event, data: None)
+
+        def slow_idle_check(self, timeout=None):
+            time.sleep(timeout)   # bloqueio real, igual um idle_check de verdade
+            return []
+
+        monkeypatch.setattr(FakeIdleClient, 'idle_check', slow_idle_check)
+
+        im = IMAPIdleManager(ms, app)
+        im.IDLE_RENEW_SECONDS = 2
+        im.IDLE_CHECK_TIMEOUT = 0.3   # valor pequeno, igual ao fix (era 20 antes)
+
+        stop = threading.Event()
+
+        def run_with_context():
+            with app.app_context():
+                im._run_session(account_id, stop, 0)
+
+        t = threading.Thread(target=run_with_context, daemon=True)
+        t.start()
+        time.sleep(0.1)   # deixa o IDLE entrar no meio de um ciclo
+
+        account = Account.query.get(account_id)
+        start = time.monotonic()
+        ms._safe_exec(account, lambda c: c.select_folder('INBOX', readonly=True))
+        elapsed = time.monotonic() - start
+
+        stop.set()
+        t.join(timeout=5)
+
+        # com o fix (IDLE_CHECK_TIMEOUT baixo), a espera fica perto de um
+        # ciclo só — bem abaixo do que seria com os 20s antigos.
+        assert elapsed < 1.0

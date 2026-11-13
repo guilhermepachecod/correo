@@ -214,9 +214,9 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 #compose-modal.minimized #compose-header { cursor:pointer; border-bottom:none; }
 #compose-header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; flex-shrink:0; }
 #compose-title  { font-size:13px; font-weight:500; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-#compose-close, #compose-minimize, #compose-maximize-btn { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:14px; padding:2px 7px; border-radius:4px; line-height:1.6; }
+#compose-close, #compose-discard, #compose-minimize, #compose-maximize-btn { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:14px; padding:2px 7px; border-radius:4px; line-height:1.6; }
 #compose-close { font-size:17px; }
-#compose-close:hover, #compose-minimize:hover, #compose-maximize-btn:hover { color:var(--text); background:var(--bg3); }
+#compose-close:hover, #compose-discard:hover, #compose-minimize:hover, #compose-maximize-btn:hover { color:var(--text); background:var(--bg3); }
 .compose-mode-tabs { display:flex; gap:4px; }
 .compose-tab { background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 8px; cursor:pointer; }
 .compose-tab.active { border-color:var(--accent); color:var(--accent); }
