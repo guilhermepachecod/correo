@@ -128,10 +128,22 @@ def get_email(email_id):
     if not email.body_cached:
         _ms().fetch_full_body(email)  # busca corpo sob demanda (Fase 2.7)
     if not email.is_read:
-        account = email.account  # carrega antes do commit para evitar DetachedInstanceError
         email.is_read = True
         db.session.commit()
-        _ms().mark_read_on_server(email, account)
+        # Marcar \Seen no servidor é um roundtrip IMAP de verdade — nunca
+        # trave a resposta por isso (era a causa real de abrir mensagem
+        # ficar lento depois da conexão compartilhada com o IDLE). O estado
+        # local já está correto; o servidor sincroniza em background.
+        ms      = _ms()
+        app_obj = current_app._get_current_object()
+
+        def run():
+            with app_obj.app_context():
+                e = Email.query.get(email_id)
+                if e:
+                    ms.mark_read_on_server(e, e.account)
+
+        threading.Thread(target=run, daemon=True).start()
     return jsonify(_sanitized_dict(email))
 
 

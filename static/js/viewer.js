@@ -182,16 +182,20 @@ function _renderEmailBody() {
       <style>body{font-family:sans-serif;color:#111;background:#fff;margin:0;padding:12px;
       word-wrap:break-word;overflow-wrap:break-word}img{max-width:100%}</style></head>
       <body>${html}</body></html>`;
-    let iframe = document.getElementById('ev-body-iframe');
-    if (!iframe) {
-      iframe = document.createElement('iframe');
-      iframe.id = 'ev-body-iframe';
-      iframe.setAttribute('sandbox', 'allow-popups');
-      iframe.style.cssText = 'width:100%;border:0;display:block;height:70vh;background:#fff;border-radius:var(--radius);';
-      bodyHtml.innerHTML = '';
-      bodyHtml.appendChild(iframe);
-    }
+    // Sempre recria o iframe em vez de reaproveitar um já existente: ao
+    // trocar pra "Texto" o iframe antigo só fica escondido (display:none no
+    // pai), nunca é removido — reatribuir .srcdoc num iframe que ficou
+    // oculto nem sempre dispara o reload no navegador, e a mensagem voltava
+    // em branco ao trocar de volta pra "HTML".
+    const old = document.getElementById('ev-body-iframe');
+    if (old) old.remove();
+    const iframe = document.createElement('iframe');
+    iframe.id = 'ev-body-iframe';
+    iframe.setAttribute('sandbox', 'allow-popups');
+    iframe.style.cssText = 'width:100%;border:0;display:block;height:70vh;background:#fff;border-radius:var(--radius);';
     iframe.srcdoc = srcdoc;
+    bodyHtml.innerHTML = '';
+    bodyHtml.appendChild(iframe);
   } else {
     bodyHtml.style.display = 'none'; bodyText.style.display = 'block';
     bodyText.textContent = email.body_text || '';

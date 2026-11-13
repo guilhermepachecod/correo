@@ -1,0 +1,2 @@
+cd /root/correo && docker-compose pull correo && docker-compose up -d --force-recreate correo && sleep 15
+cd /root/correo && docker exec correo grep -c "Folga fora do lock entre ciclos" /app/services/idle_manager.py
