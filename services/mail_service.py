@@ -280,6 +280,18 @@ class MailService:
             log.warning(f'sync_folder_incremental search error {account.email}/{folder}: {e}')
             return {'ok': False, 'error': str(e)}
 
+        # Contagem real do servidor — grava já, antes do resto da sync (que
+        # pode levar bem mais tempo numa pasta gigante sincronizando pela
+        # primeira vez). O badge/contador da lista usa isso, não a contagem
+        # local, pra nunca mostrar um número menor que a realidade do
+        # servidor só porque o download ainda não terminou.
+        fs.server_total = len(all_uids)
+        try:
+            fs.server_unread = len(self._safe_exec(account, lambda c: c.search('UNSEEN')))
+        except Exception as e:
+            log.warning(f'sync_folder_incremental UNSEEN search error {account.email}/{folder}: {e}')
+        db.session.commit()
+
         existing_rows = {r.uid: r for r in
                          Email.query.filter_by(account_id=account.id, folder=folder).all()}
         existing_uids = set(existing_rows)

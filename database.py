@@ -224,6 +224,14 @@ class FolderState(db.Model):
     highestmodseq = db.Column(db.Integer, nullable=True)
     last_sync     = db.Column(db.DateTime, nullable=True)
     role          = db.Column(db.String(20), nullable=True)  # inbox|sent|trash|junk|drafts|archive
+    # Contagem real do servidor (IMAP SEARCH ALL/UNSEEN), atualizada a cada
+    # sync_folder_incremental — existe pra badge/contador da lista mostrarem
+    # o total de verdade mesmo numa pasta gigante que ainda está sincronizando
+    # localmente pela primeira vez (nunca ficam defasados do que já sabemos
+    # via UID, mesmo que o download do corpo das mensagens ainda não tenha
+    # terminado).
+    server_total  = db.Column(db.Integer, nullable=True)
+    server_unread = db.Column(db.Integer, nullable=True)
     __table_args__ = (
         db.UniqueConstraint('account_id', 'folder', name='uq_folder_state_account_folder'),
     )
@@ -329,6 +337,20 @@ def _migration_003_account_prefs(conn) -> None:
             pass
 
 
+def _migration_004_folder_server_counts(conn) -> None:
+    """Contagem real do servidor por pasta (SEARCH ALL/UNSEEN) — ver
+    FolderState.server_total/server_unread."""
+    statements = [
+        "ALTER TABLE folder_state ADD COLUMN server_total INTEGER",
+        "ALTER TABLE folder_state ADD COLUMN server_unread INTEGER",
+    ]
+    for sql in statements:
+        try:
+            conn.execute(db.text(sql)); conn.commit()
+        except Exception:
+            pass
+
+
 # Lista ordenada de migrações. Cada uma roda exatamente uma vez por banco —
 # a versão aplicada fica registrada em schema_version. Para adicionar uma
 # migração nova, só acrescentar uma tupla (N, fn) no fim, nunca remover ou
@@ -337,6 +359,7 @@ MIGRATIONS = [
     (1, _migration_001_legacy),
     (2, _migration_002_folder_state),
     (3, _migration_003_account_prefs),
+    (4, _migration_004_folder_server_counts),
 ]
 
 

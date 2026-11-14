@@ -214,3 +214,32 @@ def test_uidvalidity_change_reindexes_folder(monkeypatch):
         assert len(rows) == 3       # sem duplicados
         fs = FolderState.query.filter_by(account_id=acc.id, folder='INBOX').first()
         assert fs.uidvalidity == 222
+
+
+def test_sync_records_real_server_total_and_unread(monkeypatch):
+    """O pedido real: o contador da lista/badge tem que refletir o total e o
+    não lido reais do servidor (SEARCH ALL/UNSEEN), não só o que já foi
+    sincronizado localmente — sync_folder_incremental grava isso em
+    FolderState.server_total/server_unread assim que descobre, antes mesmo
+    de terminar de baixar o corpo das mensagens."""
+    with app.app_context():
+        db.session.query(Email).delete()
+        db.session.query(FolderState).delete()
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = _make_account('sync5@example.com')
+
+        class FakeClientWithUnseen(FakeClient):
+            def search(self, criteria='ALL'):
+                if criteria == 'UNSEEN':
+                    return [2, 3]
+                return sorted(self.all_uids)
+
+        fake = FakeClientWithUnseen()
+        fake.all_uids = {1, 2, 3}
+        ms = _ms_with_fake(monkeypatch, fake)
+        ms.sync_folder_incremental(acc, 'INBOX')
+
+        fs = FolderState.query.filter_by(account_id=acc.id, folder='INBOX').first()
+        assert fs.server_total  == 3
+        assert fs.server_unread == 2

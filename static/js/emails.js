@@ -79,7 +79,7 @@ async function loadEmails(append = false, silent = false) {
   const PER_PAGE  = 50;
 
   try {
-    let all = [], anyHasMore = false;
+    let all = [], anyHasMore = false, totalCount = 0;
     if (state.currentView) {
       // Visão unificada: um único request agrega todas as contas pelo role
       // da pasta no servidor (não precisa iterar pasta por pasta aqui).
@@ -88,6 +88,7 @@ async function loadEmails(append = false, silent = false) {
       const data = await (await api(`/api/emails?${params}`)).json();
       all = data.emails;
       anyHasMore = data.page < data.pages;
+      totalCount = data.total;
     } else {
       for (const folder of folders) {
         const params = new URLSearchParams({ folder, page: state.currentPage, per_page: PER_PAGE });
@@ -96,9 +97,15 @@ async function loadEmails(append = false, silent = false) {
         const data = await (await api(`/api/emails?${params}`)).json();
         all = all.concat(data.emails);
         if (data.page < data.pages) anyHasMore = true;
+        totalCount += data.total;
       }
     }
-    state.hasMore = anyHasMore;
+    state.hasMore     = anyHasMore;
+    // Total real (vem do servidor via FolderState.server_total quando
+    // disponível — ver routes/emails.py) — nunca só "quantas linhas já
+    // carregamos na tela", senão uma pasta com milhares de mensagens mostra
+    // um número que só cresce 50 em 50 conforme rola, sem dizer o total real.
+    state.totalEmails = totalCount;
     const sorted  = sortEmails(all);
 
     if (append) {
@@ -107,7 +114,6 @@ async function loadEmails(append = false, silent = false) {
       state.emails = state.emails.concat(fresh);
       _appendEmailItems(fresh);
     } else {
-      state.totalEmails = sorted.length;
       _applyEmailDiff(sorted);
     }
     _updateEmailCountBar();
@@ -124,9 +130,10 @@ function _updateEmailCountBar() {
   const bar = document.getElementById('email-count-bar');
   if (!bar) return;
   if (!state.emails.length) { bar.textContent = 'Nenhum e-mail'; return; }
+  const total = state.totalEmails || state.emails.length;
   bar.textContent = state.hasMore
-    ? `Mostrando ${state.emails.length} e-mails — role para carregar mais`
-    : `${state.emails.length} e-mail${state.emails.length !== 1 ? 's' : ''}`;
+    ? `Mostrando ${state.emails.length} de ${total} e-mails — role para carregar mais`
+    : `${total} e-mail${total !== 1 ? 's' : ''}`;
 }
 
 function _showBottomSpinner(show) {

@@ -79,3 +79,28 @@ def test_unread_message_in_trash_is_tagged_with_trash_role():
         data = r.get_json()
 
         assert data['INBOX.Trash'] == {'total': 1, 'unread': 1, 'role': 'trash'}
+
+
+def test_server_total_overrides_local_count_when_present():
+    """O pedido real: numa pasta gigante ainda sincronizando pela primeira
+    vez, o badge tem que mostrar o total do servidor (FolderState.
+    server_total/server_unread, gravado por sync_folder_incremental), não
+    só o que já está em cache local — senão mostra 1 quando o servidor tem
+    1000."""
+    with app.app_context():
+        acc = _seed()
+        fs = FolderState.query.filter_by(account_id=acc.id, folder='INBOX').first()
+        fs.server_total  = 1000
+        fs.server_unread = 42
+        db.session.commit()
+
+        client = app.test_client()
+        _login(client)
+
+        r = client.get(f'/api/folders/counts?account_id={acc.id}')
+        data = r.get_json()
+
+        # só 1 e-mail em cache local, mas o servidor diz 1000/42
+        assert data['INBOX'] == {'total': 1000, 'unread': 42, 'role': 'inbox'}
+        # a Lixeira nunca sincronizou essa contagem ainda — cai pro local
+        assert data['INBOX.Trash'] == {'total': 0, 'unread': 0, 'role': 'trash'}

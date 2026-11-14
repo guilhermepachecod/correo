@@ -45,8 +45,10 @@ def test_opening_unread_email_does_not_block_on_mark_read_on_server(monkeypatch)
 
         calls = []
 
+        SLOW_SECONDS = 3   # bem maior que qualquer jitter de CI sob carga
+
         def slow_mark_read(email_obj, account=None):
-            time.sleep(0.5)   # simula o roundtrip IMAP real
+            time.sleep(SLOW_SECONDS)   # simula o roundtrip IMAP real
             calls.append(email_obj.id)
             return True
 
@@ -61,13 +63,15 @@ def test_opening_unread_email_does_not_block_on_mark_read_on_server(monkeypatch)
 
     assert r.status_code == 200
     assert r.get_json()['is_read'] is True
-    # a resposta não pode ter esperado o mark_read_on_server (0.5s) inteiro
-    assert elapsed < 0.3
+    # a resposta não pode ter esperado o mark_read_on_server inteiro — usa
+    # uma margem larga (bem menor que SLOW_SECONDS) pra não ser flaky sob
+    # carga, mas ainda prova que não ficou bloqueada nele
+    assert elapsed < SLOW_SECONDS / 2
 
     with app.app_context():
         assert Email.query.get(email_id).is_read is True
 
-    for _ in range(20):
+    for _ in range(int((SLOW_SECONDS + 2) / 0.05)):
         if calls:
             break
         time.sleep(0.05)

@@ -67,9 +67,11 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .folder-item:hover { background:var(--bg3); color:var(--text); }
 .folder-item.active { background:var(--accent); color:#fff; }
 .folder-item.active .folder-badge { background:rgba(255,255,255,0.3); }
+.folder-item.active .folder-badge-unread { background:rgba(255,255,255,0.3); }
 .folder-icon { font-size:11px; flex-shrink:0; width:14px; text-align:center; }
 .folder-name { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .folder-badge { background:var(--bg4); color:var(--text); border-radius:99px; font-size:10px; font-weight:600; padding:1px 5px; min-width:16px; text-align:center; flex-shrink:0; }
+.folder-badge-unread { background:var(--accent); color:#fff; border-radius:99px; font-size:10px; font-weight:600; padding:1px 5px; min-width:16px; text-align:center; flex-shrink:0; }
 #unified-views { padding:4px 0; flex-shrink:0; }
 .unified-view-item { display:flex; align-items:center; gap:6px; padding:4px 8px; cursor:pointer; color:var(--text); font-size:12px; font-weight:500; transition:background var(--trans); border-radius:4px; margin:1px 4px; height:var(--row-h); }
 .unified-view-item:hover { background:var(--bg3); }

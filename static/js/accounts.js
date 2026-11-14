@@ -55,6 +55,15 @@ function matchFolderDef(folderName) {
   return FOLDER_DEFS.find(d => d.match(folderName)) || null;
 }
 
+// Badge de cada pasta mostra o total de mensagens sempre (cinza) e, quando
+// tem não lida, um segundo badge destacado com esse número ao lado.
+function _folderBadgesHtml(total, unread) {
+  if (!total) return '';
+  let html = `<span class="folder-badge">${total}</span>`;
+  if (unread > 0) html += `<span class="folder-badge-unread">${unread}</span>`;
+  return html;
+}
+
 // ── Carregamento ──────────────────────────────────────────────────────────────
 
 async function loadAccounts() {
@@ -221,7 +230,7 @@ function renderAccountTree() {
       folderEl.innerHTML = `
         <span class="folder-icon">${def.icon}</span>
         <span class="folder-name">${def.label}</span>
-        ${unreadC > 0 ? `<span class="folder-badge">${unreadC}</span>` : ''}
+        ${_folderBadgesHtml(totalC, unreadC)}
       `;
       folderEl.onclick = () => selectFolder(acc.id, def.key, realList);
       foldersDiv.appendChild(folderEl);
@@ -237,7 +246,7 @@ function renderAccountTree() {
       folderEl.innerHTML = `
         <span class="folder-icon">📁</span>
         <span class="folder-name">${esc(real)}</span>
-        ${c.unread > 0 ? `<span class="folder-badge">${c.unread}</span>` : ''}
+        ${_folderBadgesHtml(c.total, c.unread)}
       `;
       folderEl.onclick = () => selectFolder(acc.id, real, [real]);
       foldersDiv.appendChild(folderEl);

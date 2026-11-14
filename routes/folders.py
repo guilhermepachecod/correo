@@ -54,10 +54,16 @@ def folder_counts():
     if account_id:
         fs_q = fs_q.filter_by(account_id=account_id)
     for fs in fs_q.all():
-        if fs.folder in result:
-            result[fs.folder]['role'] = fs.role
-        else:
-            result[fs.folder] = {'total': 0, 'unread': 0, 'role': fs.role}
+        if fs.folder not in result:
+            result[fs.folder] = {'total': 0, 'unread': 0, 'role': None}
+        result[fs.folder]['role'] = fs.role
+        # Prefere a contagem real do servidor (SEARCH ALL/UNSEEN, atualizada
+        # a cada sync) sobre a local — numa pasta gigante ainda sincronizando
+        # pela primeira vez, a contagem local fica bem menor que a real.
+        if fs.server_total is not None:
+            result[fs.folder]['total'] = fs.server_total
+        if fs.server_unread is not None:
+            result[fs.folder]['unread'] = fs.server_unread
 
     return jsonify(result)
 

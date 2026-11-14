@@ -62,6 +62,36 @@ def _apply_view_filter(q, view: str, account_id: int = None):
     return q, None
 
 
+def _server_total_count(view: str, account_id: int, folder: str):
+    """Total real do servidor (FolderState.server_total/server_unread,
+    atualizado a cada sync_folder_incremental) pra essa visão/pasta — None
+    se nenhuma pasta relevante já sincronizou essa contagem ainda (nesse
+    caso quem chama cai pra pag.total, a contagem local). Nunca usado com
+    `search` ativo: busca por texto é sempre sobre o que já foi sincronizado
+    localmente, o servidor não entra nessa conta."""
+    if view == 'starred':
+        return None  # estrela é cross-folder — sem total de pasta único
+    fs_q = FolderState.query
+    if view:
+        role = _VIEW_ROLE.get(view)
+        if not role:
+            return None
+        fs_q = fs_q.filter_by(role=role)
+        field = 'server_unread' if view == 'unread' else 'server_total'
+    else:
+        if not folder:
+            return None
+        fs_q = fs_q.filter_by(folder=folder)
+        field = 'server_total'
+    if account_id:
+        fs_q = fs_q.filter_by(account_id=account_id)
+    rows = fs_q.all()
+    values = [getattr(r, field) for r in rows]
+    if not values or all(v is None for v in values):
+        return None
+    return sum(v or 0 for v in values)
+
+
 @bp.get('/api/emails')
 def get_emails():
     account_id = request.args.get('account_id', type=int)
@@ -70,6 +100,7 @@ def get_emails():
     per_page   = request.args.get('per_page', 50, type=int)
     search     = request.args.get('search', '').strip()
     thread_id  = request.args.get('thread_id', '').strip()
+    folder     = None
 
     q = Email.query
     if account_id: q = q.filter_by(account_id=account_id)
@@ -93,9 +124,21 @@ def get_emails():
         ))
     q = q.order_by(Email.date.desc())
     pag = q.paginate(page=page, per_page=per_page, error_out=False)
+
+    # O total mostrado na tela tem que refletir o servidor, não só o que já
+    # sincronizamos localmente — numa pasta com milhares de mensagens ainda
+    # sincronizando pela primeira vez, pag.total ficaria bem menor que a
+    # realidade. A paginação em si (pages/hasMore) continua sobre o que já
+    # está sincronizado, que é o único conteúdo que dá pra rolar e mostrar.
+    total = pag.total
+    if not search:
+        server_total = _server_total_count(view, account_id, folder)
+        if server_total is not None:
+            total = server_total
+
     return jsonify({
         'emails': [e.to_list_dict() for e in pag.items],
-        'total':  pag.total,
+        'total':  total,
         'pages':  pag.pages,
         'page':   page,
     })
