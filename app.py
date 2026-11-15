@@ -8,15 +8,28 @@ import threading
 import logging
 from pathlib import Path
 
-from flask import Flask, render_template, request, session, jsonify, redirect
+from flask import Flask, render_template, request, session, jsonify, redirect, Response, abort
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+from services import log_buffer
+log_buffer.install()
+
 # Rotas liberadas sem sessão autenticada.
 _PUBLIC_PATHS   = {'/login', '/api/login', '/healthz'}
 _PUBLIC_PREFIXES = ('/static/',)
+
+# GET /api/debug/logs — ver o log ao vivo via curl, sem precisar de SSH no
+# host. Só existe de verdade se CORREO_DEBUG_LOG_TOKEN estiver definida no
+# .env; sem ela, a rota segue as regras normais de sessão (não dá pra
+# acessar via curl simples) e sempre devolve 404. Gere um token forte
+# (ex.: `openssl rand -hex 32`) — qualquer um com ele lê os logs, então
+# trate como senha.
+_DEBUG_LOG_TOKEN = os.environ.get('CORREO_DEBUG_LOG_TOKEN')
+if _DEBUG_LOG_TOKEN:
+    _PUBLIC_PATHS.add('/api/debug/logs')
 
 
 def _require_secret(name: str) -> str:
@@ -117,6 +130,16 @@ def create_app() -> Flask:
     @app.route('/healthz')
     def healthz():
         return jsonify({'ok': True})
+
+    # ── Log ao vivo via curl (opt-in — ver _DEBUG_LOG_TOKEN acima) ────────────
+    @app.route('/api/debug/logs')
+    def debug_logs():
+        if not _DEBUG_LOG_TOKEN or request.args.get('token') != _DEBUG_LOG_TOKEN:
+            abort(404)
+        n    = min(request.args.get('tail', 300, type=int) or 300, log_buffer.MAXLEN)
+        grep = (request.args.get('grep') or '').strip() or None
+        lines = log_buffer.tail(n, grep)
+        return Response(('\n'.join(lines) + '\n') if lines else '(sem linhas)\n', mimetype='text/plain')
 
     # ── Página principal ───────────────────────────────────────────────────────
     @app.route('/')
