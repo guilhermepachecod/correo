@@ -21,6 +21,15 @@ def _ms():
     from extensions import mail_service
     return mail_service
 
+# Trava contra ação de pasta inteira duplicada na mesma (account_id, folder)
+# — defesa em profundidade além da trava no frontend (static/js/emails.js):
+# cobre duas abas abertas, um duplo-clique que escapou da trava de lá, ou
+# um retry de rede reenviando a mesma requisição. Bug real em produção:
+# duas chamadas concorrentes de "apagar todos" na mesma pasta (visto nos
+# logs como duas threads "iniciando" pro mesmo acc/folder ao mesmo tempo).
+_bulk_whole_folder_lock = threading.Lock()
+_bulk_whole_folder_inflight = set()   # {(account_id, folder)}
+
 
 def _sanitized_dict(email: Email) -> dict:
     d = email.to_dict()
@@ -441,48 +450,60 @@ def bulk_action():
     Account.query.get_or_404(account_id)
     app_obj = current_app._get_current_object()
 
+    key = (account_id, folder)
+    with _bulk_whole_folder_lock:
+        if key in _bulk_whole_folder_inflight:
+            log.warning(f'bulk {action} acc={account_id} folder={folder}: '
+                        f'já tem uma ação rodando nessa pasta, ignorando duplicata')
+            return jsonify({'ok': False, 'error': 'já tem uma ação de pasta inteira em andamento nessa pasta'}), 409
+        _bulk_whole_folder_inflight.add(key)
+
     def run():
-        with app_obj.app_context():
-            account = Account.query.get(account_id)
-            if not account:
-                return
-            log.info(f'bulk {action} pasta inteira: iniciando acc={account_id} '
-                     f'({account.email}) folder={folder}')
-            try:
-                live_uids = ms.list_folder_uids(account, folder)
-            except Exception as e:
-                log.warning(f'bulk {action} live UIDs error (acc={account_id} folder={folder}): {e}')
+        try:
+            with app_obj.app_context():
+                account = Account.query.get(account_id)
+                if not account:
+                    return
+                log.info(f'bulk {action} pasta inteira: iniciando acc={account_id} '
+                         f'({account.email}) folder={folder}')
+                try:
+                    live_uids = ms.list_folder_uids(account, folder)
+                except Exception as e:
+                    log.warning(f'bulk {action} live UIDs error (acc={account_id} folder={folder}): {e}')
+                    ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
+                                           'ok': False, 'count': 0, 'errors': [str(e)]})
+                    return
+                log.info(f'bulk {action} acc={account_id} folder={folder}: '
+                         f'{len(live_uids)} UID(s) no servidor')
+                if not live_uids:
+                    ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
+                                           'ok': True, 'count': 0, 'errors': []})
+                    return
+                local_rows = {e.uid: e for e in Email.query.filter_by(account_id=account_id, folder=folder)
+                                                           .filter(Email.uid.in_(live_uids)).all()}
+                log.info(f'bulk {action} acc={account_id} folder={folder}: '
+                         f'{len(local_rows)} já sincronizada(s) localmente')
+                groups = {(account_id, folder): {u: local_rows.get(u) for u in live_uids}}
+                count, errors = _process_bulk_groups(ms, groups, action, log)
+                log.info(f'bulk {action} acc={account_id} folder={folder}: concluído '
+                         f'count={count} errors={len(errors)}')
+                if errors:
+                    log.warning(f'bulk {action} acc={account_id} folder={folder} erros: {errors}')
+                # Re-sincroniza a pasta agora, não espera o próximo poll
+                # periódico (até 120s depois) — sem isso, FolderState.
+                # server_total/server_unread (usados pelo badge e pelo
+                # contador da lista) ficavam com o número de antes da
+                # exclusão até o próximo ciclo, dando a impressão de que
+                # "apagar todos" não tinha feito nada.
+                try:
+                    ms.sync_folder_incremental(account, folder)
+                except Exception as e:
+                    log.warning(f'bulk {action} re-sync pós-ação error (acc={account_id} folder={folder}): {e}')
                 ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
-                                       'ok': False, 'count': 0, 'errors': [str(e)]})
-                return
-            log.info(f'bulk {action} acc={account_id} folder={folder}: '
-                     f'{len(live_uids)} UID(s) no servidor')
-            if not live_uids:
-                ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
-                                       'ok': True, 'count': 0, 'errors': []})
-                return
-            local_rows = {e.uid: e for e in Email.query.filter_by(account_id=account_id, folder=folder)
-                                                       .filter(Email.uid.in_(live_uids)).all()}
-            log.info(f'bulk {action} acc={account_id} folder={folder}: '
-                     f'{len(local_rows)} já sincronizada(s) localmente')
-            groups = {(account_id, folder): {u: local_rows.get(u) for u in live_uids}}
-            count, errors = _process_bulk_groups(ms, groups, action, log)
-            log.info(f'bulk {action} acc={account_id} folder={folder}: concluído '
-                     f'count={count} errors={len(errors)}')
-            if errors:
-                log.warning(f'bulk {action} acc={account_id} folder={folder} erros: {errors}')
-            # Re-sincroniza a pasta agora, não espera o próximo poll periódico
-            # (até 120s depois) — sem isso, FolderState.server_total/
-            # server_unread (usados pelo badge e pelo contador da lista desde
-            # a última mudança) ficavam com o número de antes da exclusão até
-            # o próximo ciclo, dando a impressão de que "apagar todos" não
-            # tinha feito nada.
-            try:
-                ms.sync_folder_incremental(account, folder)
-            except Exception as e:
-                log.warning(f'bulk {action} re-sync pós-ação error (acc={account_id} folder={folder}): {e}')
-            ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
-                                   'ok': count > 0 or not errors, 'count': count, 'errors': errors})
+                                       'ok': count > 0 or not errors, 'count': count, 'errors': errors})
+        finally:
+            with _bulk_whole_folder_lock:
+                _bulk_whole_folder_inflight.discard(key)
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify({'ok': True, 'async': True})

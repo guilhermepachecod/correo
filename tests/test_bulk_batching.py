@@ -110,6 +110,47 @@ def test_whole_folder_action_responds_immediately_async(monkeypatch):
     assert r.get_json() == {'ok': True, 'async': True}
 
 
+def test_second_whole_folder_request_on_same_folder_is_rejected_while_first_runs(monkeypatch):
+    """Bug real em produção: dois cliques (ou duas abas) disparando 'apagar
+    todos' na mesma pasta ao mesmo tempo rodavam duas threads em paralelo,
+    cada uma reprocessando/reexpurgando os mesmos UIDs. A rota agora recusa
+    (409) uma segunda ação de pasta inteira enquanto a primeira ainda não
+    terminou pra essa mesma (account_id, folder)."""
+    import time as time_module
+    import extensions
+
+    with app.app_context():
+        acc = _seed_many(20)
+        account_id = acc.id
+
+        class SlowClient(BatchRecordingClient):
+            def add_flags(self, uids, flags):
+                time_module.sleep(0.3)   # mantém a thread "em andamento"
+                super().add_flags(uids, flags)
+
+        fake_client = SlowClient(all_uids=list(range(1, 21)))
+        monkeypatch.setattr(extensions.mail_service, '_safe_exec', lambda account, fn: fn(fake_client))
+        monkeypatch.setattr(extensions.mail_service, 'role_folder', lambda account, role: None)
+        events = []
+        monkeypatch.setattr(extensions.mail_service, '_emit', lambda ev, data: events.append((ev, data)))
+
+    client = app.test_client()
+    _login(client)
+
+    body = {'action': 'delete', 'ids': [], 'folder': 'INBOX.Trash', 'account_id': account_id}
+    r1 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+    assert r1.status_code == 200
+
+    r2 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+    assert r2.status_code == 409   # a primeira ainda está rodando (add_flags dormindo)
+
+    _wait_for_bulk_done(events)   # espera a primeira terminar antes de sair do teste
+
+    # depois que a primeira termina, uma nova ação na mesma pasta é aceita de novo
+    r3 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+    assert r3.status_code == 200
+
+
 def test_large_delete_is_split_into_multiple_imap_batches(monkeypatch):
     """~520 mensagens já na Lixeira: nenhum comando IMAP deve levar mais
     que BULK_IMAP_BATCH UIDs de uma vez, e todas devem ser removidas."""

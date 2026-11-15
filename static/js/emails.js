@@ -398,68 +398,92 @@ async function bulkAction(action) {
   }
 }
 
+let _bulkAllInFlight = false;
+
 async function bulkActionAll(action) {
   if (!state.selectedAccountId) { toast('Selecione uma conta primeiro', 'error'); return; }
+  // Trava contra clique duplo — sem isso, dois cliques rápidos disparavam
+  // duas ações de pasta inteira em paralelo na mesma pasta (bug real visto
+  // em produção: duas threads de "apagar todos" rodando ao mesmo tempo).
+  if (_bulkAllInFlight) { toast('Já tem uma ação de pasta inteira em andamento — espera terminar', 'error'); return; }
+
   const L = { mark_read: 'Marcar todos como lido', delete: 'Excluir todos' };
-  if (!confirm(`${L[action]} na pasta atual?`)) return;
 
   // Captura estado no momento do clique — não usa state depois dos awaits
   const accountId = state.selectedAccountId;
   const folders   = state.selectedFolderReals?.length ? [...state.selectedFolderReals] : ['INBOX'];
   const count     = state.emails.length;
 
-  // Optimistic: atualiza UI imediatamente
-  if (action === 'delete') {
-    state.emails = []; hideEmail(); state.selectedEmailId = null; renderEmailList();
-  } else if (action === 'mark_read') {
-    state.emails.forEach(e => { e.is_read = true; _patchEmailItem(e.id, { is_read: true }); });
+  // Confirmação tem que dizer EXATAMENTE conta + pasta — bug real em
+  // produção: um clique na pasta/conta errada moveu ~15 mil mensagens do
+  // "Todos os e-mails" do Gmail pra Lixeira porque o texto genérico ("na
+  // pasta atual?") não dava nenhuma chance de notar o engano antes de
+  // confirmar.
+  const acc = state.accounts.find(a => a.id === accountId);
+  const accLabel = acc ? acc.email : `conta #${accountId}`;
+  const folderLabel = folders.join(', ');
+  if (!confirm(
+    `${L[action]} em TODA a pasta "${folderLabel}" da conta ${accLabel}?\n\n` +
+    `Isso afeta TODAS as mensagens dessa pasta no servidor (não só as que estão na tela agora).`
+  )) return;
+
+  _bulkAllInFlight = true;
+  try {
+    // Optimistic: atualiza UI imediatamente
+    if (action === 'delete') {
+      state.emails = []; hideEmail(); state.selectedEmailId = null; renderEmailList();
+    } else if (action === 'mark_read') {
+      state.emails.forEach(e => { e.is_read = true; _patchEmailItem(e.id, { is_read: true }); });
+    }
+    state.selectedIds.clear();
+    _updateEmailCountBar();
+    toast(`Processando ${count} e-mail(s) em segundo plano...`, 'info');
+
+    // "Pasta inteira" roda em background no servidor (pode ser milhares de
+    // mensagens — não pode travar a requisição HTTP, senão o navegador vê
+    // erro de conexão mesmo quando o servidor termina certinho). O
+    // resultado real chega pelo evento bulk_done; o listener precisa estar
+    // registrado ANTES de disparar os requests, pra não perder um evento
+    // que volte rápido demais.
+    const pending = new Set(folders);
+    let totalDone = 0, hasError = false;
+
+    const waitForCompletion = new Promise(resolve => {
+      const handler = d => {
+        if (d.account_id !== accountId || d.action !== action || !pending.has(d.folder)) return;
+        pending.delete(d.folder);
+        totalDone += d.count || 0;
+        if (!d.ok || (d.errors || []).length) hasError = true;
+        if (pending.size === 0) { socket.off('bulk_done', handler); resolve(); }
+      };
+      socket.on('bulk_done', handler);
+      // Salvaguarda — nunca espera pra sempre se algo não voltar
+      setTimeout(() => { socket.off('bulk_done', handler); resolve(); }, 5 * 60 * 1000);
+    });
+
+    for (const folder of folders) {
+      try {
+        const res = await api('/api/emails/bulk', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, ids: [], folder, account_id: accountId }),
+        });
+        if (!res.ok) { pending.delete(folder); hasError = true; }
+      } catch(e) { pending.delete(folder); hasError = true; }
+    }
+
+    if (pending.size > 0) await waitForCompletion;
+
+    // Recarrega lista e contagens reais
+    await loadEmails();
+    refreshFolderCounts();
+
+    toast(hasError
+      ? `Concluído com erros — ${totalDone} e-mail(s) processado(s)`
+      : `✓ ${L[action]}: ${totalDone} e-mail(s)`,
+      hasError ? 'error' : 'success');
+  } finally {
+    _bulkAllInFlight = false;
   }
-  state.selectedIds.clear();
-  _updateEmailCountBar();
-  toast(`Processando ${count} e-mail(s) em segundo plano...`, 'info');
-
-  // "Pasta inteira" roda em background no servidor (pode ser milhares de
-  // mensagens — não pode travar a requisição HTTP, senão o navegador vê
-  // erro de conexão mesmo quando o servidor termina certinho). O
-  // resultado real chega pelo evento bulk_done; o listener precisa estar
-  // registrado ANTES de disparar os requests, pra não perder um evento
-  // que volte rápido demais.
-  const pending = new Set(folders);
-  let totalDone = 0, hasError = false;
-
-  const waitForCompletion = new Promise(resolve => {
-    const handler = d => {
-      if (d.account_id !== accountId || d.action !== action || !pending.has(d.folder)) return;
-      pending.delete(d.folder);
-      totalDone += d.count || 0;
-      if (!d.ok || (d.errors || []).length) hasError = true;
-      if (pending.size === 0) { socket.off('bulk_done', handler); resolve(); }
-    };
-    socket.on('bulk_done', handler);
-    // Salvaguarda — nunca espera pra sempre se algo não voltar
-    setTimeout(() => { socket.off('bulk_done', handler); resolve(); }, 5 * 60 * 1000);
-  });
-
-  for (const folder of folders) {
-    try {
-      const res = await api('/api/emails/bulk', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, ids: [], folder, account_id: accountId }),
-      });
-      if (!res.ok) { pending.delete(folder); hasError = true; }
-    } catch(e) { pending.delete(folder); hasError = true; }
-  }
-
-  if (pending.size > 0) await waitForCompletion;
-
-  // Recarrega lista e contagens reais
-  await loadEmails();
-  refreshFolderCounts();
-
-  toast(hasError
-    ? `Concluído com erros — ${totalDone} e-mail(s) processado(s)`
-    : `✓ ${L[action]}: ${totalDone} e-mail(s)`,
-    hasError ? 'error' : 'success');
 }
 
 // ── Busca IMAP no servidor ────────────────────────────────────────────────────
