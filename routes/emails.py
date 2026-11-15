@@ -319,7 +319,19 @@ def _process_bulk_groups(ms, groups: dict, action: str, log) -> tuple[int, list]
             continue
         has_move, has_uidplus = 'MOVE' in caps, 'UIDPLUS' in caps
 
-        trash  = ms.role_folder(acc, 'trash')  if action == 'delete' else None
+        # Bug real: contas (Gmail, por exemplo) podem ter DUAS pastas
+        # diferentes marcadas com role=trash (ex.: "Trash" e "[Gmail]/
+        # Lixeira") — role_folder(acc, 'trash') devolve só uma, sem
+        # garantia de ser a mesma de `fldr`. Excluir de dentro da própria
+        # Lixeira (ou do Spam) acabava "movendo" pra uma pasta que já é
+        # lixeira/spam, o que não apaga nada de verdade. Se `fldr` já é
+        # trash/junk, o destino nunca importa — vai direto pro ramo de
+        # exclusão permanente (flag \Deleted + uid_expunge) mais abaixo.
+        fldr_state = FolderState.query.filter_by(account_id=acc_id, folder=fldr).first()
+        fldr_role  = (fldr_state.role if fldr_state else None) or detect_role(fldr)
+        already_disposed = fldr_role in ('trash', 'junk')
+
+        trash  = ms.role_folder(acc, 'trash') if (action == 'delete' and not already_disposed) else None
         target = (ms.role_folder(acc, 'junk') if action == 'mark_spam'
                   else ms.role_folder(acc, 'inbox') or 'INBOX') if action in ('mark_spam', 'mark_not_spam') else None
 

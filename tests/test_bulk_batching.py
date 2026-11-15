@@ -20,9 +20,24 @@ a exclusão certinho, mas o navegador recebia erro de conexão (parecia
 """
 import time
 
+import pytest
+
 from app import app
 from database import db, Account, Email, FolderState
 from routes.emails import BULK_IMAP_BATCH
+import routes.emails as emails_module
+
+
+@pytest.fixture(autouse=True)
+def _reset_whole_folder_lock():
+    # Trava global de routes/emails.py (_bulk_whole_folder_inflight) — sem
+    # limpar entre testes, uma chave (account_id, folder) de um teste
+    # anterior pode "sobreviver" se o account_id for reaproveitado (SQLite
+    # reusa rowid depois de Account.query.delete()), fazendo um teste
+    # seguinte ver a pasta como "já em andamento" por engano.
+    emails_module._bulk_whole_folder_inflight.clear()
+    yield
+    emails_module._bulk_whole_folder_inflight.clear()
 
 
 class BatchRecordingClient:
@@ -416,3 +431,53 @@ def test_whole_folder_delete_in_known_trash_role_needs_no_flag(monkeypatch):
 
     result = _wait_for_bulk_done(events)
     assert result['count'] == 1
+
+
+def test_whole_folder_delete_purges_even_when_another_folder_also_has_trash_role(monkeypatch):
+    """Mesmo bug do test_mail_service_actions.py, mas pelo caminho de
+    'apagar todos' (routes/emails.py._process_bulk_groups): conta com DUAS
+    pastas role=trash (Gmail: 'Trash' e '[Gmail]/Lixeira') — excluir de
+    dentro de UMA delas não pode "mover" pra outra só porque
+    role_folder('trash') escolheu a outra."""
+    import extensions
+
+    with app.app_context():
+        db.session.query(Email).delete()
+        db.session.query(FolderState).delete()
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = Account(name='t', email='doubletrash@example.com', imap_host='h', smtp_host='s',
+                     username='doubletrash@example.com', password_enc='x', capabilities='["UIDPLUS","MOVE"]')
+        db.session.add(acc)
+        db.session.commit()
+        account_id = acc.id
+        # role_folder('trash') vai devolver 'Trash' (inserida primeiro) —
+        # a exclusão abaixo é feita de dentro de '[Gmail]/Lixeira', a outra.
+        db.session.add(FolderState(account_id=account_id, folder='Trash', role='trash'))
+        db.session.add(FolderState(account_id=account_id, folder='[Gmail]/Lixeira', role='trash'))
+        for uid in range(1, 11):
+            db.session.add(Email(account_id=account_id, folder='[Gmail]/Lixeira', uid=uid,
+                                 subject=f'm{uid}', from_addr='a@b.com', is_read=True))
+        db.session.commit()
+
+        fake_client = BatchRecordingClient(all_uids=list(range(1, 11)))
+        monkeypatch.setattr(extensions.mail_service, '_safe_exec', lambda account, fn: fn(fake_client))
+        events = []
+        monkeypatch.setattr(extensions.mail_service, '_emit', lambda ev, data: events.append((ev, data)))
+
+    client = app.test_client()
+    _login(client)
+
+    body = {'action': 'delete', 'ids': [], 'folder': '[Gmail]/Lixeira', 'account_id': account_id}
+    r = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+    assert r.status_code == 200
+
+    result = _wait_for_bulk_done(events)
+    assert result['count'] == 10
+    assert result['errors'] == []
+
+    uid_expunge_calls = [c for c in fake_client.calls if c[0] == 'uid_expunge']
+    assert len(uid_expunge_calls) == 1   # exclusão definitiva, não "move" pra Trash
+
+    with app.app_context():
+        assert Email.query.filter_by(account_id=account_id).count() == 0

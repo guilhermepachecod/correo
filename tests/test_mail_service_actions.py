@@ -97,6 +97,29 @@ def test_delete_in_trash_purges_permanently_with_uid_expunge(monkeypatch):
         assert Email.query.get(email.id) is None
 
 
+def test_delete_in_trash_purges_even_when_another_folder_also_has_trash_role(monkeypatch):
+    """Bug real em produção: contas (Gmail) podem ter DUAS pastas diferentes
+    com role=trash (ex.: 'INBOX.Trash' e '[Gmail]/Lixeira'). role_folder()
+    devolve só uma — sem este fix, excluir uma mensagem que já está na OUTRA
+    pasta de lixeira (não a que role_folder escolheu) virava um "mover de
+    lixeira pra lixeira" que nunca apaga nada de verdade."""
+    with app.app_context():
+        ms, acc, email, client = _setup(monkeypatch)
+        db.session.add(FolderState(account_id=acc.id, folder='INBOX.Trash', role='trash'))
+        db.session.add(FolderState(account_id=acc.id, folder='[Gmail]/Lixeira', role='trash'))
+        db.session.commit()
+        email.folder = '[Gmail]/Lixeira'   # não é a que role_folder('trash') escolheria
+        db.session.commit()
+
+        result = ms.delete_email(email, acc)
+
+        assert result == {'ok': True, 'permanent': True}
+        assert not any(c[0] in ('move', 'copy') for c in client.calls)
+        assert ('add_flags', (42,), ('\\Deleted',)) in client.calls
+        assert ('uid_expunge', (42,)) in client.calls
+        assert Email.query.get(email.id) is None
+
+
 def test_delete_without_uidplus_only_flags_and_keeps_local_row(monkeypatch):
     """Sem UIDPLUS nunca chamamos EXPUNGE genérico — mensagem fica só
     flagada no servidor e o registro local NÃO é removido (resolve B1/B7)."""

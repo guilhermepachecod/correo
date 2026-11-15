@@ -636,7 +636,17 @@ class MailService:
         if not uid:
             return {'ok': False, 'error': 'uid ausente'}
 
-        trash = self.role_folder(acc, 'trash')
+        # Bug real: uma conta pode ter duas pastas diferentes com role=trash
+        # (Gmail: "Trash" e "[Gmail]/Lixeira") — role_folder(acc, 'trash')
+        # devolve só uma, sem garantia de ser a mesma pasta da mensagem.
+        # Excluir uma mensagem que já está numa pasta trash/junk (mesmo que
+        # não seja a que role_folder escolheu) sempre vai direto pra exclusão
+        # definitiva — nunca "move" de lixeira pra lixeira.
+        fs = FolderState.query.filter_by(account_id=acc.id, folder=folder).first()
+        folder_role = (fs.role if fs else None) or detect_role(folder)
+        already_disposed = folder_role in ('trash', 'junk')
+
+        trash = None if already_disposed else self.role_folder(acc, 'trash')
         caps  = self._capabilities(acc)
         has_uidplus = 'UIDPLUS' in caps
 
