@@ -165,6 +165,18 @@ def test_second_whole_folder_request_on_same_folder_is_rejected_while_first_runs
     r3 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
     assert r3.status_code == 200
 
+    # Espera essa 2ª thread terminar antes de sair do teste — sem isso, ela
+    # fica rodando em paralelo com o próximo teste e pode emitir bulk_done
+    # bem depois, contaminando o `events` monkeypatchado de outro teste
+    # (bug real visto no CI: um teste seguinte recebia um bulk_done de
+    # count=20 — exatamente o tamanho semeado aqui — em vez do seu próprio).
+    for _ in range(200):
+        if sum(1 for e in events if e[0] == 'bulk_done') >= 2:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError('2ª bulk_done (da r3) nunca chegou')
+
 
 def test_large_delete_is_split_into_multiple_imap_batches(monkeypatch):
     """~520 mensagens já na Lixeira: nenhum comando IMAP deve levar mais
