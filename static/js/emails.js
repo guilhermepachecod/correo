@@ -422,7 +422,30 @@ async function bulkActionAll(action) {
   const acc = state.accounts.find(a => a.id === accountId);
   const accLabel = acc ? acc.email : `conta #${accountId}`;
   const folderLabel = folders.join(', ');
-  if (!confirm(
+
+  // Fora de Lixeira/Spam, "excluir todos" é bem mais arriscado (Inbox,
+  // Enviados, Arquivo, ou uma pasta sem role conhecido como "Todos os
+  // e-mails" do Gmail — onde já aconteceu de verdade, duas vezes, um
+  // clique acabar indo pra lá por engano enquanto a pessoa testava outra
+  // conta). Pra essas, só clicar OK não basta — tem que digitar o e-mail
+  // da conta, uma fricção de propósito maior que um simples confirm().
+  const ROLE_SAFE_FOR_DELETE_ALL = new Set(['trash', 'junk']);
+  const counts = (typeof folderCountsData !== 'undefined' && folderCountsData[accountId]) || {};
+  const rolesInvolved = folders.map(f => counts[f]?.role || null);
+  const isDangerousDelete = action === 'delete' && !rolesInvolved.every(r => ROLE_SAFE_FOR_DELETE_ALL.has(r));
+
+  if (isDangerousDelete) {
+    const typed = prompt(
+      `ATENÇÃO: "${folderLabel}" não é Lixeira nem Spam — excluir tudo aqui é ` +
+      `bem mais arriscado (pode ser Inbox, Enviados, Arquivo, ou "Todos os ` +
+      `e-mails" do Gmail).\n\nPra confirmar mesmo assim, digite o e-mail da ` +
+      `conta (${accLabel}):`
+    );
+    if ((typed || '').trim().toLowerCase() !== accLabel.toLowerCase()) {
+      toast('Cancelado — e-mail não confere', 'info');
+      return;
+    }
+  } else if (!confirm(
     `${L[action]} em TODA a pasta "${folderLabel}" da conta ${accLabel}?\n\n` +
     `Isso afeta TODAS as mensagens dessa pasta no servidor (não só as que estão na tela agora).`
   )) return;
@@ -465,7 +488,13 @@ async function bulkActionAll(action) {
       try {
         const res = await api('/api/emails/bulk', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action, ids: [], folder, account_id: accountId }),
+          body: JSON.stringify({
+            action, ids: [], folder, account_id: accountId,
+            // O servidor também recusa pasta fora de Lixeira/Spam sem isso
+            // (defesa em profundidade — nunca confia só na confirmação do
+            // frontend pra uma ação tão destrutiva).
+            confirm_dangerous: isDangerousDelete,
+          }),
         });
         if (!res.ok) { pending.delete(folder); hasError = true; }
       } catch(e) { pending.delete(folder); hasError = true; }

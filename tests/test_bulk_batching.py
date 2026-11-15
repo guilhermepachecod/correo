@@ -329,3 +329,90 @@ def test_explicit_selection_still_runs_synchronously(monkeypatch):
 
     with app.app_context():
         assert Email.query.filter_by(account_id=account_id).count() == 0
+
+
+def test_whole_folder_delete_outside_trash_junk_is_rejected_without_flag(monkeypatch):
+    """Incidente real em produção: um clique acabou disparando 'apagar
+    todos' contra '[Gmail]/Todos os e-mails' (All Mail) em vez da Lixeira —
+    role desconhecido (nem folder_state, nem o detector por nome reconhece
+    essa variante em português). Fora de Lixeira/Spam, a rota recusa sem
+    o flag explícito confirm_dangerous."""
+    import extensions
+
+    with app.app_context():
+        db.session.query(Email).delete()
+        db.session.query(FolderState).delete()
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = Account(name='t', email='alldangerous@example.com', imap_host='h', smtp_host='s',
+                     username='alldangerous@example.com', password_enc='x', capabilities='["UIDPLUS"]')
+        db.session.add(acc)
+        db.session.commit()
+        account_id = acc.id
+        db.session.add(Email(account_id=account_id, folder='[Gmail]/Todos os e-mails', uid=1,
+                             subject='m1', from_addr='a@b.com', is_read=True))
+        db.session.commit()
+
+        fake_client = BatchRecordingClient(all_uids=[1])
+        monkeypatch.setattr(extensions.mail_service, '_safe_exec', lambda account, fn: fn(fake_client))
+        monkeypatch.setattr(extensions.mail_service, 'role_folder', lambda account, role: None)
+        events = []
+        monkeypatch.setattr(extensions.mail_service, '_emit', lambda ev, data: events.append((ev, data)))
+
+    client = app.test_client()
+    _login(client)
+
+    body = {'action': 'delete', 'ids': [], 'folder': '[Gmail]/Todos os e-mails', 'account_id': account_id}
+
+    r_no_flag = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+    assert r_no_flag.status_code == 400
+    assert r_no_flag.get_json()['ok'] is False
+
+    with app.app_context():
+        assert Email.query.filter_by(account_id=account_id).count() == 1   # nada foi tocado
+
+    r_with_flag = client.post('/api/emails/bulk', json={**body, 'confirm_dangerous': True},
+                              headers={'X-Correo-CSRF': 'tok'})
+    assert r_with_flag.status_code == 200
+    assert r_with_flag.get_json() == {'ok': True, 'async': True}
+
+    result = _wait_for_bulk_done(events)
+    assert result['count'] == 1
+
+
+def test_whole_folder_delete_in_known_trash_role_needs_no_flag(monkeypatch):
+    """Lixeira/Spam continuam sem essa fricção extra — só a confirmação
+    normal do frontend já basta, igual sempre funcionou."""
+    import extensions
+
+    with app.app_context():
+        db.session.query(Email).delete()
+        db.session.query(FolderState).delete()
+        db.session.query(Account).delete()
+        db.session.commit()
+        acc = Account(name='t', email='safetrash@example.com', imap_host='h', smtp_host='s',
+                     username='safetrash@example.com', password_enc='x', capabilities='["UIDPLUS"]')
+        db.session.add(acc)
+        db.session.commit()
+        account_id = acc.id
+        db.session.add(FolderState(account_id=account_id, folder='INBOX.Junk', role='junk'))
+        db.session.add(Email(account_id=account_id, folder='INBOX.Junk', uid=1,
+                             subject='spam', from_addr='a@b.com', is_read=True))
+        db.session.commit()
+
+        fake_client = BatchRecordingClient(all_uids=[1])
+        monkeypatch.setattr(extensions.mail_service, '_safe_exec', lambda account, fn: fn(fake_client))
+        monkeypatch.setattr(extensions.mail_service, 'role_folder', lambda account, role: None)
+        events = []
+        monkeypatch.setattr(extensions.mail_service, '_emit', lambda ev, data: events.append((ev, data)))
+
+    client = app.test_client()
+    _login(client)
+
+    body = {'action': 'delete', 'ids': [], 'folder': 'INBOX.Junk', 'account_id': account_id}
+    r = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+    assert r.status_code == 200
+    assert r.get_json() == {'ok': True, 'async': True}
+
+    result = _wait_for_bulk_done(events)
+    assert result['count'] == 1

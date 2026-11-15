@@ -14,6 +14,7 @@ from flask import Blueprint, request, jsonify, send_file, abort, current_app
 
 from database import db, Account, Email, Attachment, FolderState
 from services.sanitize import sanitize_email_html
+from services.special_folders import detect_role
 
 bp = Blueprint('emails', __name__)
 
@@ -447,7 +448,26 @@ def bulk_action():
     # parecer concluído mas só afetava as primeiras centenas sincronizadas.
     if not account_id:
         return jsonify({'ok': True, 'count': 0})
-    Account.query.get_or_404(account_id)
+    account_obj = Account.query.get_or_404(account_id)
+
+    # Nunca confia só na confirmação do frontend pra isso — incidente real:
+    # excluir a pasta inteira fora de Lixeira/Spam (ex.: "Todos os
+    # e-mails" do Gmail) já aconteceu por engano. O frontend exige digitar
+    # o e-mail da conta nesses casos e manda confirm_dangerous=true só
+    # depois disso; sem esse flag, uma pasta sem role trash/junk é recusada
+    # aqui também.
+    if action == 'delete':
+        fs = FolderState.query.filter_by(account_id=account_id, folder=folder).first()
+        # Role ainda pode não ter sido gravado em folder_state (conta nova,
+        # primeiro sync ainda não rodou) — cai pro mesmo detector por nome
+        # usado em refresh_folder_roles, pra não bloquear uma Lixeira óbvia
+        # só porque ainda não sincronizou.
+        role = (fs.role if fs else None) or detect_role(folder)
+        if role not in ('trash', 'junk') and not data.get('confirm_dangerous'):
+            log.warning(f'bulk delete pasta inteira recusado: acc={account_id} '
+                        f'({account_obj.email}) folder={folder} role={role} sem confirm_dangerous')
+            return jsonify({'ok': False, 'error': 'pasta fora de Lixeira/Spam exige confirmação explícita'}), 400
+
     app_obj = current_app._get_current_object()
 
     key = (account_id, folder)
