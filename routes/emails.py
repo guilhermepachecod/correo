@@ -319,6 +319,8 @@ def _process_bulk_groups(ms, groups: dict, action: str, log) -> tuple[int, list]
             # o comando IMAP roda sobre todo batch_uids mesmo assim, só o
             # lado do banco (flags/move/delete local) fica restrito a quem
             # tem linha local.
+            log.info(f'bulk {action} acc={acc_id} folder={fldr}: processando lote de '
+                     f'{len(batch_uids)} UID(s) (has_move={has_move} has_uidplus={has_uidplus})')
             batch_emails = [e for e in (by_uid[u] for u in batch_uids) if e is not None]
             batch_ids    = [e.id for e in batch_emails]
             try:
@@ -394,6 +396,9 @@ def _process_bulk_groups(ms, groups: dict, action: str, log) -> tuple[int, list]
                 errors.append(f'{acc.email}/{fldr}: {e}')
                 try: db.session.rollback()
                 except Exception: pass
+            else:
+                log.info(f'bulk {action} acc={acc_id} folder={fldr}: lote de {len(batch_uids)} UID(s) '
+                         f'concluído sem erro (total acumulado {count})')
 
     return count, errors
 
@@ -441,6 +446,8 @@ def bulk_action():
             account = Account.query.get(account_id)
             if not account:
                 return
+            log.info(f'bulk {action} pasta inteira: iniciando acc={account_id} '
+                     f'({account.email}) folder={folder}')
             try:
                 live_uids = ms.list_folder_uids(account, folder)
             except Exception as e:
@@ -448,14 +455,32 @@ def bulk_action():
                 ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
                                        'ok': False, 'count': 0, 'errors': [str(e)]})
                 return
+            log.info(f'bulk {action} acc={account_id} folder={folder}: '
+                     f'{len(live_uids)} UID(s) no servidor')
             if not live_uids:
                 ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
                                        'ok': True, 'count': 0, 'errors': []})
                 return
             local_rows = {e.uid: e for e in Email.query.filter_by(account_id=account_id, folder=folder)
                                                        .filter(Email.uid.in_(live_uids)).all()}
+            log.info(f'bulk {action} acc={account_id} folder={folder}: '
+                     f'{len(local_rows)} já sincronizada(s) localmente')
             groups = {(account_id, folder): {u: local_rows.get(u) for u in live_uids}}
             count, errors = _process_bulk_groups(ms, groups, action, log)
+            log.info(f'bulk {action} acc={account_id} folder={folder}: concluído '
+                     f'count={count} errors={len(errors)}')
+            if errors:
+                log.warning(f'bulk {action} acc={account_id} folder={folder} erros: {errors}')
+            # Re-sincroniza a pasta agora, não espera o próximo poll periódico
+            # (até 120s depois) — sem isso, FolderState.server_total/
+            # server_unread (usados pelo badge e pelo contador da lista desde
+            # a última mudança) ficavam com o número de antes da exclusão até
+            # o próximo ciclo, dando a impressão de que "apagar todos" não
+            # tinha feito nada.
+            try:
+                ms.sync_folder_incremental(account, folder)
+            except Exception as e:
+                log.warning(f'bulk {action} re-sync pós-ação error (acc={account_id} folder={folder}): {e}')
             ms._emit('bulk_done', {'account_id': account_id, 'folder': folder, 'action': action,
                                    'ok': count > 0 or not errors, 'count': count, 'errors': errors})
 

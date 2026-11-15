@@ -21,7 +21,7 @@ a exclusão certinho, mas o navegador recebia erro de conexão (parecia
 import time
 
 from app import app
-from database import db, Account, Email
+from database import db, Account, Email, FolderState
 from routes.emails import BULK_IMAP_BATCH
 
 
@@ -46,6 +46,10 @@ class BatchRecordingClient:
 
     def uid_expunge(self, uids):
         self.calls.append(('uid_expunge', tuple(uids)))
+        # Reflete a exclusão de verdade — sem isso, um SEARCH ALL depois do
+        # expunge continuaria achando os UIDs já apagados (ver teste de
+        # re-sync pós-ação em bulk_action).
+        self.all_uids = [u for u in self.all_uids if u not in uids]
 
     def expunge(self):
         raise AssertionError('expunge() genérico chamado — regressão do bug B7')
@@ -60,6 +64,7 @@ def _login(client):
 
 def _seed_many(n=520):
     db.session.query(Email).delete()
+    db.session.query(FolderState).delete()
     db.session.query(Account).delete()
     db.session.commit()
     acc = Account(name='t', email='bigtrash@example.com', imap_host='h', smtp_host='s',
@@ -142,6 +147,46 @@ def test_large_delete_is_split_into_multiple_imap_batches(monkeypatch):
 
     with app.app_context():
         assert Email.query.filter_by(account_id=account_id).count() == 0
+
+
+def test_whole_folder_delete_refreshes_server_total_badge_immediately(monkeypatch):
+    """Bug real reportado: depois de 'apagar todos', o badge/contador
+    continuava mostrando o número de antes por até ~120s (até o próximo
+    poll periódico recalcular FolderState.server_total/server_unread) —
+    parecia que a exclusão não tinha feito nada, mesmo já tendo apagado
+    tudo no servidor. bulk_action agora re-sincroniza a pasta antes de
+    emitir bulk_done."""
+    import extensions
+
+    with app.app_context():
+        acc = _seed_many(50)
+        account_id = acc.id
+
+        fake_client = BatchRecordingClient(all_uids=list(range(1, 51)))
+        monkeypatch.setattr(extensions.mail_service, '_safe_exec', lambda account, fn: fn(fake_client))
+        monkeypatch.setattr(extensions.mail_service, 'role_folder', lambda account, role: None)
+        events = []
+        monkeypatch.setattr(extensions.mail_service, '_emit', lambda ev, data: events.append((ev, data)))
+
+        # Badge mostrava isso antes da exclusão — tem que deixar de mostrar.
+        db.session.add(FolderState(account_id=account_id, folder='INBOX.Trash',
+                                   role='trash', server_total=50, server_unread=0))
+        db.session.commit()
+
+    client = app.test_client()
+    _login(client)
+
+    r = client.post('/api/emails/bulk', json={'action': 'delete', 'ids': [], 'folder': 'INBOX.Trash',
+                                               'account_id': account_id},
+                    headers={'X-Correo-CSRF': 'tok'})
+    assert r.status_code == 200
+
+    result = _wait_for_bulk_done(events)
+    assert result['count'] == 50
+
+    with app.app_context():
+        fs = FolderState.query.filter_by(account_id=account_id, folder='INBOX.Trash').first()
+        assert fs.server_total == 0   # não ficou parado em 50
 
 
 def test_one_failed_batch_does_not_abort_the_others(monkeypatch):
