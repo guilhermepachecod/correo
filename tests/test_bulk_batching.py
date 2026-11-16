@@ -18,6 +18,7 @@ request, podia passar do timeout do gunicorn/proxy: o servidor terminava
 a exclusão certinho, mas o navegador recebia erro de conexão (parecia
 "0 processado" mesmo com tudo apagado de verdade).
 """
+import threading
 import time
 
 import pytest
@@ -130,20 +131,35 @@ def test_second_whole_folder_request_on_same_folder_is_rejected_while_first_runs
     todos' na mesma pasta ao mesmo tempo rodavam duas threads em paralelo,
     cada uma reprocessando/reexpurgando os mesmos UIDs. A rota agora recusa
     (409) uma segunda ação de pasta inteira enquanto a primeira ainda não
-    terminou pra essa mesma (account_id, folder)."""
-    import time as time_module
+    terminou pra essa mesma (account_id, folder).
+
+    Determinístico de propósito — nenhum time.sleep() como "torcer pra dar
+    tempo": dois threading.Event controlam exatamente quando a thread de
+    fundo entra em add_flags e quando ela tem permissão pra continuar. Um
+    sleep fixo (0.3s) passava no sandbox local mas falhava de forma
+    flakey no runner do GitHub (mais rápido ou mais lento dependendo do
+    momento — qualquer sleep fixo é uma aposta)."""
     import extensions
 
     with app.app_context():
         acc = _seed_many(20)
         account_id = acc.id
+        import routes.emails as emails_mod
+        # Garantia extra, específica pra esse (account_id, folder) — o
+        # autouse já limpa tudo, mas não custa nada ser redundante aqui
+        # já que foi exatamente essa chave que apareceu presa no CI.
+        emails_mod._bulk_whole_folder_inflight.discard((account_id, 'INBOX.Trash'))
 
-        class SlowClient(BatchRecordingClient):
+        entered_add_flags = threading.Event()
+        release_add_flags  = threading.Event()
+
+        class BlockingClient(BatchRecordingClient):
             def add_flags(self, uids, flags):
-                time_module.sleep(0.3)   # mantém a thread "em andamento"
+                entered_add_flags.set()
+                release_add_flags.wait(timeout=10)
                 super().add_flags(uids, flags)
 
-        fake_client = SlowClient(all_uids=list(range(1, 21)))
+        fake_client = BlockingClient(all_uids=list(range(1, 21)))
         monkeypatch.setattr(extensions.mail_service, '_safe_exec', lambda account, fn: fn(fake_client))
         monkeypatch.setattr(extensions.mail_service, 'role_folder', lambda account, role: None)
         events = []
@@ -156,10 +172,13 @@ def test_second_whole_folder_request_on_same_folder_is_rejected_while_first_runs
     r1 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
     assert r1.status_code == 200
 
-    r2 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
-    assert r2.status_code == 409   # a primeira ainda está rodando (add_flags dormindo)
+    assert entered_add_flags.wait(timeout=5), 'thread de fundo nunca chegou em add_flags'
 
-    _wait_for_bulk_done(events)   # espera a primeira terminar antes de sair do teste
+    r2 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+    assert r2.status_code == 409   # a primeira está parada dentro de add_flags, de propósito
+
+    release_add_flags.set()   # libera a primeira thread pra terminar
+    _wait_for_bulk_done(events)
 
     # depois que a primeira termina, uma nova ação na mesma pasta é aceita de novo
     r3 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
