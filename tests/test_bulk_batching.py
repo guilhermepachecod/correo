@@ -205,6 +205,14 @@ def test_large_delete_is_split_into_multiple_imap_batches(monkeypatch):
     assert all(len(c[1]) <= BULK_IMAP_BATCH for c in uid_expunge_calls)
     assert len(add_flags_calls) == 3  # 520 / 200 arredondado pra cima
 
+    # Pedido do usuário: progresso visível na tela durante a ação, não só
+    # um evento no início e um no fim — um lote concluído emite bulk_progress
+    # com done/total crescendo até bater com o total da pasta.
+    progress = [e[1] for e in events if e[0] == 'bulk_progress']
+    assert [p['done'] for p in progress] == [200, 400, 520]
+    assert all(p['total'] == 520 for p in progress)
+    assert all(p['folder'] == 'INBOX.Trash' for p in progress)
+
     with app.app_context():
         assert Email.query.filter_by(account_id=account_id).count() == 0
 

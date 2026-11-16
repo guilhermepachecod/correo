@@ -78,6 +78,8 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .unified-view-item.active { background:var(--accent); color:#fff; }
 .unified-view-item.active .folder-badge { background:rgba(255,255,255,0.3); }
 .ei-account-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; margin-left:2px; }
+#bulk-progress-bar { display:none; font-size:11px; color:var(--muted); background:var(--bg3); padding:4px 10px;
+  border-top:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex-shrink:0; }
 #sidebar-footer { border-top:1px solid var(--line); padding:6px 8px 8px; flex-shrink:0; }
 .sidebar-action { display:flex; align-items:center; gap:7px; padding:5px 8px; border-radius:4px; cursor:pointer; color:var(--muted); font-size:12px; transition:all var(--trans); }
 .sidebar-action:hover { background:var(--bg3); color:var(--text); }

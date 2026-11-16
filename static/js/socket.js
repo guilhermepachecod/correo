@@ -133,3 +133,36 @@ socket.on('imap_search_done', d => {
 });
 
 socket.on('idle_status', () => {});
+
+// Linha única e persistente de progresso (pedido do usuário: ver o
+// andamento de uma ação em pasta inteira sem precisar de log/terminal —
+// "apagar todos" numa pasta com milhares de mensagens só mostrava um toast
+// no início e outro no fim, nada visível entre eles). Some sozinha 4s
+// depois do último evento, então cobre tanto progresso quanto conclusão
+// sem precisar rastrear quantas pastas/ações estão em andamento.
+let _bulkProgressHideTimer = null;
+function _showBulkProgress(text) {
+  const bar = document.getElementById('bulk-progress-bar');
+  if (!bar) return;
+  bar.textContent = text;
+  bar.style.display = 'block';
+  clearTimeout(_bulkProgressHideTimer);
+  _bulkProgressHideTimer = setTimeout(() => { bar.style.display = 'none'; }, 4000);
+}
+
+const _BULK_ACTION_LABEL = {
+  delete: 'Excluindo', mark_read: 'Marcando como lido', mark_unread: 'Marcando como não lido',
+  mark_spam: 'Marcando como spam', mark_not_spam: 'Removendo de spam',
+};
+
+socket.on('bulk_progress', d => {
+  const pct = d.total ? Math.round((d.done / d.total) * 100) : 0;
+  _showBulkProgress(`${_BULK_ACTION_LABEL[d.action] || d.action}: ${d.folder} — ${d.done}/${d.total} (${pct}%)`);
+});
+
+socket.on('bulk_done', d => {
+  const label = _BULK_ACTION_LABEL[d.action] || d.action;
+  _showBulkProgress(d.ok
+    ? `${label} concluído: ${d.folder} — ${d.count} processado(s)`
+    : `${label} com erro: ${d.folder} — ${d.count} processado(s), ${(d.errors || []).length} erro(s)`);
+});

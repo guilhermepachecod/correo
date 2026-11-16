@@ -335,6 +335,9 @@ def _process_bulk_groups(ms, groups: dict, action: str, log) -> tuple[int, list]
         target = (ms.role_folder(acc, 'junk') if action == 'mark_spam'
                   else ms.role_folder(acc, 'inbox') or 'INBOX') if action in ('mark_spam', 'mark_not_spam') else None
 
+        group_total = len(by_uid)
+        group_done  = 0
+
         for batch_uids in _chunks(list(by_uid.keys()), BULK_IMAP_BATCH):
             # by_uid[u] é None pra UID que existe no servidor mas ainda não
             # foi sincronizado localmente (ver ramo "pasta inteira" acima) —
@@ -419,8 +422,15 @@ def _process_bulk_groups(ms, groups: dict, action: str, log) -> tuple[int, list]
                 try: db.session.rollback()
                 except Exception: pass
             else:
+                group_done += len(batch_uids)
                 log.info(f'bulk {action} acc={acc_id} folder={fldr}: lote de {len(batch_uids)} UID(s) '
                          f'concluído sem erro (total acumulado {count})')
+                # Pedido do usuário: um jeito de ver o andamento na própria
+                # tela, sem precisar olhar log — uma pasta grande (milhares
+                # de UIDs) podia levar minutos só mandando um toast no início
+                # e outro no fim, sem nada visível entre eles.
+                ms._emit('bulk_progress', {'account_id': acc_id, 'folder': fldr, 'action': action,
+                                           'done': group_done, 'total': group_total})
 
     return count, errors
 
