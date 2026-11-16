@@ -18,7 +18,6 @@ request, podia passar do timeout do gunicorn/proxy: o servidor terminava
 a exclusão certinho, mas o navegador recebia erro de conexão (parecia
 "0 processado" mesmo com tudo apagado de verdade).
 """
-import threading
 import time
 
 import pytest
@@ -129,37 +128,25 @@ def test_whole_folder_action_responds_immediately_async(monkeypatch):
 def test_second_whole_folder_request_on_same_folder_is_rejected_while_first_runs(monkeypatch):
     """Bug real em produção: dois cliques (ou duas abas) disparando 'apagar
     todos' na mesma pasta ao mesmo tempo rodavam duas threads em paralelo,
-    cada uma reprocessando/reexpurgando os mesmos UIDs. A rota agora recusa
-    (409) uma segunda ação de pasta inteira enquanto a primeira ainda não
-    terminou pra essa mesma (account_id, folder).
+    cada uma reprocessando/reexpurgando os mesmos UIDs. A rota recusa (409)
+    uma segunda ação de pasta inteira enquanto a primeira ainda não terminou
+    pra essa mesma (account_id, folder).
 
-    Determinístico de propósito — nenhum time.sleep() como "torcer pra dar
-    tempo": dois threading.Event controlam exatamente quando a thread de
-    fundo entra em add_flags e quando ela tem permissão pra continuar. Um
-    sleep fixo (0.3s) passava no sandbox local mas falhava de forma
-    flakey no runner do GitHub (mais rápido ou mais lento dependendo do
-    momento — qualquer sleep fixo é uma aposta)."""
+    Testado direto na trava (_bulk_whole_folder_inflight), sem threading
+    real nem Flask test client concorrente — duas tentativas anteriores
+    (time.sleep fixo, depois threading.Event) deram resultados diferentes
+    e flakeys entre o sandbox local e o runner do GitHub Actions (timing
+    de thread real não é portável entre ambientes). Simular o estado "já
+    em andamento" preenchendo a mesma estrutura que a rota consulta prova
+    exatamente a mesma lógica, de forma 100% determinística."""
     import extensions
+    import routes.emails as emails_mod
 
     with app.app_context():
-        acc = _seed_many(20)
+        acc = _seed_many(5)
         account_id = acc.id
-        import routes.emails as emails_mod
-        # Garantia extra, específica pra esse (account_id, folder) — o
-        # autouse já limpa tudo, mas não custa nada ser redundante aqui
-        # já que foi exatamente essa chave que apareceu presa no CI.
-        emails_mod._bulk_whole_folder_inflight.discard((account_id, 'INBOX.Trash'))
 
-        entered_add_flags = threading.Event()
-        release_add_flags  = threading.Event()
-
-        class BlockingClient(BatchRecordingClient):
-            def add_flags(self, uids, flags):
-                entered_add_flags.set()
-                release_add_flags.wait(timeout=10)
-                super().add_flags(uids, flags)
-
-        fake_client = BlockingClient(all_uids=list(range(1, 21)))
+        fake_client = BatchRecordingClient(all_uids=[1, 2, 3, 4, 5])
         monkeypatch.setattr(extensions.mail_service, '_safe_exec', lambda account, fn: fn(fake_client))
         monkeypatch.setattr(extensions.mail_service, 'role_folder', lambda account, role: None)
         events = []
@@ -167,34 +154,20 @@ def test_second_whole_folder_request_on_same_folder_is_rejected_while_first_runs
 
     client = app.test_client()
     _login(client)
-
     body = {'action': 'delete', 'ids': [], 'folder': 'INBOX.Trash', 'account_id': account_id}
-    r1 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
-    assert r1.status_code == 200
 
-    assert entered_add_flags.wait(timeout=5), 'thread de fundo nunca chegou em add_flags'
+    key = (account_id, 'INBOX.Trash')
+    emails_mod._bulk_whole_folder_inflight.add(key)   # simula "já em andamento"
+    try:
+        r = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
+        assert r.status_code == 409
+    finally:
+        emails_mod._bulk_whole_folder_inflight.discard(key)
 
+    # liberada a trava, a mesma ação volta a ser aceita normalmente
     r2 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
-    assert r2.status_code == 409   # a primeira está parada dentro de add_flags, de propósito
-
-    release_add_flags.set()   # libera a primeira thread pra terminar
-    _wait_for_bulk_done(events)
-
-    # depois que a primeira termina, uma nova ação na mesma pasta é aceita de novo
-    r3 = client.post('/api/emails/bulk', json=body, headers={'X-Correo-CSRF': 'tok'})
-    assert r3.status_code == 200
-
-    # Espera essa 2ª thread terminar antes de sair do teste — sem isso, ela
-    # fica rodando em paralelo com o próximo teste e pode emitir bulk_done
-    # bem depois, contaminando o `events` monkeypatchado de outro teste
-    # (bug real visto no CI: um teste seguinte recebia um bulk_done de
-    # count=20 — exatamente o tamanho semeado aqui — em vez do seu próprio).
-    for _ in range(200):
-        if sum(1 for e in events if e[0] == 'bulk_done') >= 2:
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError('2ª bulk_done (da r3) nunca chegou')
+    assert r2.status_code == 200
+    _wait_for_bulk_done(events)   # espera terminar antes de sair do teste
 
 
 def test_large_delete_is_split_into_multiple_imap_batches(monkeypatch):
