@@ -150,12 +150,26 @@ function _showBottomSpinner(show) {
 
 // ── Diff animado ──────────────────────────────────────────────────────────────
 
+let _lastRenderedView = undefined;
+
 function _applyEmailDiff(newEmails) {
+  const container = document.getElementById('email-list');
+  const empty     = document.getElementById('list-empty');
+  _syncEmailListHeaderForView();
+
+  // Trocar de visão unificada <-> conta única muda se a coluna de conta
+  // existe ou não — uma linha já no DOM (reaproveitada pelo diff porque o
+  // id bate) ficaria com o HTML antigo, sem essa coluna atualizada. Força
+  // reconstrução total só nesse caso específico (troca de visão), não a
+  // cada atualização silenciosa de dentro da mesma visão.
+  if (_lastRenderedView !== state.currentView) {
+    container.querySelectorAll('.email-item').forEach(el => el.remove());
+  }
+  _lastRenderedView = state.currentView;
+
   const oldMap    = new Map(state.emails.map(e => [e.id, e]));
   const newMap    = new Map(newEmails.map(e => [e.id, e]));
   state.emails    = newEmails;
-  const container = document.getElementById('email-list');
-  const empty     = document.getElementById('list-empty');
 
   if (!newEmails.length) {
     container.querySelectorAll('.email-item').forEach(el => el.remove());
@@ -243,6 +257,21 @@ function _accountLabel(accountId) {
   return acc ? acc.email : '';
 }
 
+// Pedido do usuário: nas visões unificadas não dava pra saber de qual
+// conta uma mensagem chegou — só existia o pontinho colorido (sutil
+// demais, precisa passar o mouse pro título aparecer). Essa é a versão
+// textual, curta o bastante pra caber numa coluna da lista.
+function _accountShortLabel(accountId) {
+  const acc = state.accounts.find(a => a.id === accountId);
+  if (!acc) return '';
+  return (acc.email || '').split('@')[0];
+}
+
+function _syncEmailListHeaderForView() {
+  const header = document.getElementById('email-list-header');
+  if (header) header.classList.toggle('show-account-col', !!state.currentView);
+}
+
 // ── Construção de item ────────────────────────────────────────────────────────
 
 function _buildEmailItem(email) {
@@ -251,7 +280,8 @@ function _buildEmailItem(email) {
   item.className = 'email-item'
     + (email.is_read ? '' : ' unread')
     + (email.id === state.selectedEmailId ? ' active' : '')
-    + (state.selectedIds.has(email.id) ? ' selected' : '');
+    + (state.selectedIds.has(email.id) ? ' selected' : '')
+    + (state.currentView ? ' show-account-col' : '');
   item.dataset.id = email.id;
   if (email.thread_id) item.dataset.threadId = email.thread_id;
   item.innerHTML = `
@@ -265,6 +295,7 @@ function _buildEmailItem(email) {
       ${email.has_attachments ? '<span class="icon-attach">📎</span>' : ''}
       ${state.currentView ? `<span class="ei-account-dot" style="background:${_accountColor(email.account_id)}" title="${esc(_accountLabel(email.account_id))}"></span>` : ''}
     </div>
+    ${state.currentView ? `<div class="ei-account-col" style="color:${_accountColor(email.account_id)}" title="${esc(_accountLabel(email.account_id))}">${esc(_accountShortLabel(email.account_id))}</div>` : ''}
     <div class="ei-from">${esc(email.from_name || email.from_addr)}</div>
     <div class="ei-subject">
       ${esc(email.subject)}
@@ -284,6 +315,8 @@ function _buildEmailItem(email) {
 function renderEmailList() {
   const container = document.getElementById('email-list');
   const empty     = document.getElementById('list-empty');
+  _syncEmailListHeaderForView();
+  _lastRenderedView = state.currentView;
   container.querySelectorAll('.email-item').forEach(e => e.remove());
   if (!state.emails.length) { empty.style.display = 'flex'; return; }
   empty.style.display = 'none';

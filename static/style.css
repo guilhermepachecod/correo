@@ -124,6 +124,14 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .elh-col:hover { color:var(--text); }
 .elh-col.sorted { color:var(--accent); }
 .elh-col .sort-arrow { font-size:9px; opacity:.7; }
+/* Coluna "Conta" só aparece nas visões unificadas (Todos/Não lidos/Com
+   estrela) — numa única conta já dá pra saber de quem é, óbvio demais
+   pra merecer uma coluna. */
+#elh-account { display:none; }
+#email-list-header.show-account-col { grid-template-columns:28px 52px 90px 220px 1fr 88px; }
+#email-list-header.show-account-col #elh-account { display:flex; }
+.ei-account-col { font-size:11px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 6px; }
+.email-item.show-account-col { grid-template-columns:28px 52px 90px 220px 1fr 88px; }
 #email-list { flex:1; overflow-y:auto; min-height:0; }
 .email-item { display:grid; grid-template-columns:28px 52px 220px 1fr 88px; padding:0 10px; border-bottom:1px solid var(--line); cursor:pointer; transition:background var(--trans),opacity .2s ease,transform .2s ease; align-items:center; min-height:var(--row-h); }
 .email-item:hover  { background:var(--bg3); }
@@ -421,6 +429,8 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
   :root { --sidebar-w: 210px; }
   #email-list-header,
   .email-item { grid-template-columns: 28px 40px 150px 1fr 72px; }
+  #email-list-header.show-account-col,
+  .email-item.show-account-col { grid-template-columns: 28px 40px 70px 150px 1fr 72px; }
   #compose-box { width: 92vw; }
   #account-box { width: 92vw; }
   #filters-box { width: 92vw; }
@@ -529,12 +539,16 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 
   /* Lista mobile: layout de 2 linhas */
   #email-list-header { display: none; }
-  .email-item {
+  .email-item,
+  .email-item.show-account-col {
     grid-template-columns: 28px 30px 1fr 58px;
     grid-template-rows: auto auto;
     padding: 8px 10px; min-height: 54px;
     align-items: start; gap: 2px;
   }
+  /* Tela estreita: sem espaço pra coluna de texto — o pontinho colorido
+     no ei-icons-col (sempre visível) já identifica a conta no mobile. */
+  .ei-account-col { display: none; }
   .ei-check-col { grid-row: 1 / 3; align-self: center; }
   .ei-icons-col { grid-row: 1 / 3; align-self: center; }
   .ei-from    { grid-column: 3; font-size: 12px; font-weight: 600; padding: 0; }
