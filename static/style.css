@@ -110,13 +110,28 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 #list-actions { padding:4px 10px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:4px; flex-shrink:0; flex-wrap:wrap; }
 .la-btn { background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 7px; cursor:pointer; transition:all var(--trans); white-space:nowrap; }
 .la-btn:hover { border-color:var(--accent); color:var(--accent); }
-.la-btn.danger:hover { border-color:var(--red); color:var(--red); }
+.la-btn.danger { border-color:color-mix(in srgb,var(--red) 40%,var(--line)); color:var(--red); background:color-mix(in srgb,var(--red) 8%,transparent); }
+.la-btn.danger:hover { border-color:var(--red); background:color-mix(in srgb,var(--red) 16%,transparent); }
 .la-sep { width:1px; height:12px; background:var(--line); flex-shrink:0; }
-#bulk-bar { display:none; padding:4px 10px; background:color-mix(in srgb,var(--accent) 12%,var(--bg3)); border-bottom:1px solid var(--line); align-items:center; gap:4px; flex-shrink:0; flex-wrap:wrap; }
+/* Altura fixa e sempre reservada (visibility, não display) — sem isso,
+   selecionar/desselecionar mensagens empurrava a lista inteira pra baixo
+   e pra cima a cada clique, ruim pra quem tá navegando. */
+#bulk-bar { visibility:hidden; min-height:26px; padding:4px 10px; background:color-mix(in srgb,var(--accent) 12%,var(--bg3)); border-bottom:1px solid var(--line); align-items:center; gap:4px; flex-shrink:0; flex-wrap:wrap; }
+#bulk-bar.active { visibility:visible; }
 #bulk-count { font-size:11px; color:var(--accent); font-weight:600; flex:1; }
 .bulk-btn { background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 7px; cursor:pointer; transition:all var(--trans); white-space:nowrap; }
 .bulk-btn:hover { border-color:var(--accent); color:var(--accent); }
-.bulk-btn.danger:hover { border-color:var(--red); color:var(--red); }
+/* Destaque sutil por ação, com as cores que a aplicação já usa (verde/
+   âmbar/vermelho/azul) — só uma pista visual de "o que esse botão faz",
+   sem ficar gritante. */
+.bulk-btn.read, .bulk-btn.notspam { border-color:color-mix(in srgb,var(--green) 40%,var(--line)); color:var(--green); background:color-mix(in srgb,var(--green) 8%,transparent); }
+.bulk-btn.read:hover, .bulk-btn.notspam:hover { border-color:var(--green); background:color-mix(in srgb,var(--green) 16%,transparent); }
+.bulk-btn.unread { border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,transparent); }
+.bulk-btn.unread:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 16%,transparent); }
+.bulk-btn.spam { border-color:color-mix(in srgb,var(--amber) 45%,var(--line)); color:var(--amber); background:color-mix(in srgb,var(--amber) 8%,transparent); }
+.bulk-btn.spam:hover { border-color:var(--amber); background:color-mix(in srgb,var(--amber) 16%,transparent); }
+.bulk-btn.danger { border-color:color-mix(in srgb,var(--red) 40%,var(--line)); color:var(--red); background:color-mix(in srgb,var(--red) 8%,transparent); }
+.bulk-btn.danger:hover { border-color:var(--red); background:color-mix(in srgb,var(--red) 16%,transparent); }
 
 /* ── Email table header ── */
 #email-list-header { display:grid; grid-template-columns:28px 52px 220px 1fr 88px; padding:0 10px; border-bottom:2px solid var(--line); background:var(--bg3); flex-shrink:0; }

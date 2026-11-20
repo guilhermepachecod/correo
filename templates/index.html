@@ -108,10 +108,10 @@
 
       <div id="bulk-bar">
         <span id="bulk-count"></span>
-        <button class="bulk-btn" onclick="bulkAction('mark_read')">✓ Lido</button>
-        <button class="bulk-btn" onclick="bulkAction('mark_unread')">✉ Não lido</button>
-        <button class="bulk-btn" onclick="bulkAction('mark_spam')">⚠ Spam</button>
-        <button class="bulk-btn" onclick="bulkAction('mark_not_spam')">✓ Não spam</button>
+        <button class="bulk-btn read" onclick="bulkAction('mark_read')">✓ Lido</button>
+        <button class="bulk-btn unread" onclick="bulkAction('mark_unread')">✉ Não lido</button>
+        <button class="bulk-btn spam" onclick="bulkAction('mark_spam')">⚠ Spam</button>
+        <button class="bulk-btn notspam" onclick="bulkAction('mark_not_spam')">✓ Não spam</button>
         <button class="bulk-btn danger" onclick="bulkAction('delete')">🗑 Excluir</button>
         <button class="bulk-btn" onclick="deselectAll()" style="margin-left:auto">✕ Cancelar</button>
       </div>

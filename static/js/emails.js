@@ -373,7 +373,9 @@ function deselectAll() { state.selectedIds.clear(); renderEmailList(); }
 function renderBulkBar() {
   const bar = document.getElementById('bulk-bar');
   const n   = state.selectedIds.size;
-  bar.style.display = n ? 'flex' : 'none';
+  // visibility, não display: a barra sempre ocupa o mesmo espaço, então
+  // selecionar/desselecionar não empurra a lista pra baixo/cima.
+  bar.classList.toggle('active', n > 0);
   if (n) document.getElementById('bulk-count').textContent = `${n} selecionado(s)`;
 }
 
