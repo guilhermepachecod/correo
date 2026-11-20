@@ -147,7 +147,7 @@ async function saveFilter() {
 }
 
 async function deleteFilter(id) {
-  if (!confirm('Remover este filtro?')) return;
+  if (!await customConfirm('Remover este filtro?')) return;
   await api(`/api/filters/${id}`, { method: 'DELETE' });
   toast('Filtro removido', 'success');
   loadFilters();

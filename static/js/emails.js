@@ -385,7 +385,10 @@ async function bulkAction(action) {
   const L = { delete: 'Excluir', mark_spam: 'Marcar como spam',
               mark_read: 'Marcar como lido', mark_unread: 'Marcar como não lido',
               mark_not_spam: 'Desmarcar spam' };
-  if (['delete', 'mark_spam'].includes(action) && !confirm(`${L[action]} ${ids.length} e-mail(s)?`)) return;
+  if (['delete', 'mark_spam'].includes(action)) {
+    const ok = await customConfirm(`${L[action]} ${ids.length} e-mail(s)?`, { danger: action === 'delete' });
+    if (!ok) return;
+  }
 
   const idSet = new Set(ids);
   // Para delete/spam, aguarda confirmação do servidor antes de remover da UI
@@ -463,28 +466,30 @@ async function bulkActionAll(action) {
   // Enviados, Arquivo, ou uma pasta sem role conhecido como "Todos os
   // e-mails" do Gmail — onde já aconteceu de verdade, duas vezes, um
   // clique acabar indo pra lá por engano enquanto a pessoa testava outra
-  // conta). Pra essas, só clicar OK não basta — tem que digitar o e-mail
-  // da conta, uma fricção de propósito maior que um simples confirm().
+  // conta). Pra essas, só clicar OK não basta — exige marcar um checkbox
+  // de "tenho certeza" (não mais digitar o e-mail da conta num textbox).
   const ROLE_SAFE_FOR_DELETE_ALL = new Set(['trash', 'junk']);
   const counts = (typeof folderCountsData !== 'undefined' && folderCountsData[accountId]) || {};
   const rolesInvolved = folders.map(f => counts[f]?.role || null);
   const isDangerousDelete = action === 'delete' && !rolesInvolved.every(r => ROLE_SAFE_FOR_DELETE_ALL.has(r));
 
   if (isDangerousDelete) {
-    const typed = prompt(
-      `ATENÇÃO: "${folderLabel}" não é Lixeira nem Spam — excluir tudo aqui é ` +
-      `bem mais arriscado (pode ser Inbox, Enviados, Arquivo, ou "Todos os ` +
-      `e-mails" do Gmail).\n\nPra confirmar mesmo assim, digite o e-mail da ` +
-      `conta (${accLabel}):`
+    const ok = await customConfirm(
+      `"${folderLabel}" não é Lixeira nem Spam — excluir tudo aqui é bem mais arriscado ` +
+      `(pode ser Inbox, Enviados, Arquivo, ou "Todos os e-mails" do Gmail).\n\n` +
+      `Isso afeta TODAS as mensagens dessa pasta no servidor, da conta ${accLabel}.`,
+      { checkboxLabel: `Sim, tenho certeza — excluir tudo em "${folderLabel}" (${accLabel})`,
+        danger: true, okLabel: 'Excluir tudo' }
     );
-    if ((typed || '').trim().toLowerCase() !== accLabel.toLowerCase()) {
-      toast('Cancelado — e-mail não confere', 'info');
-      return;
-    }
-  } else if (!confirm(
-    `${L[action]} em TODA a pasta "${folderLabel}" da conta ${accLabel}?\n\n` +
-    `Isso afeta TODAS as mensagens dessa pasta no servidor (não só as que estão na tela agora).`
-  )) return;
+    if (!ok) return;
+  } else {
+    const ok = await customConfirm(
+      `${L[action]} em TODA a pasta "${folderLabel}" da conta ${accLabel}?\n\n` +
+      `Isso afeta TODAS as mensagens dessa pasta no servidor (não só as que estão na tela agora).`,
+      { danger: action === 'delete' }
+    );
+    if (!ok) return;
+  }
 
   _bulkAllInFlight = true;
   try {

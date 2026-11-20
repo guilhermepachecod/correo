@@ -57,12 +57,13 @@ function openCompose(opts = {}) {
   _startDraftAutosave();
 }
 
-function closeCompose() {
+async function closeCompose() {
   if (!document.getElementById('compose-modal').classList.contains('open')) return;
   if (!_suppressDraftOnClose && _hasDraftContent()) {
-    if (!confirm('Fechar sem enviar? O rascunho fica salvo e será recuperado na próxima vez que você abrir o correo.')) {
-      return;
-    }
+    const ok = await customConfirm(
+      'Fechar sem enviar? O rascunho fica salvo e será recuperado na próxima vez que você abrir o correo.'
+    );
+    if (!ok) return;
     _saveDraftLocally();
   } else if (!_suppressDraftOnClose) {
     _clearLocalDraft();
@@ -77,8 +78,8 @@ function closeCompose() {
 // Descarta o rascunho de propósito — diferente de closeCompose(), nunca
 // pergunta nem regrava no localStorage (é o único jeito de um rascunho de
 // teste parar de voltar sozinho a cada abertura do correo via resumeDraftIfAny()).
-function discardCompose() {
-  if (_hasDraftContent() && !confirm('Descartar este rascunho? Isso não pode ser desfeito.')) {
+async function discardCompose() {
+  if (_hasDraftContent() && !await customConfirm('Descartar este rascunho? Isso não pode ser desfeito.', { danger: true })) {
     return;
   }
   _suppressDraftOnClose = true;

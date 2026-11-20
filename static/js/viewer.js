@@ -292,7 +292,7 @@ async function toggleSpam() {
 
 async function deleteEmail() {
   if (!state.selectedEmailId) return;
-  if (!confirm('Excluir este e-mail?')) return;
+  if (!await customConfirm('Excluir este e-mail?', { danger: true })) return;
   const id = state.selectedEmailId;
   try {
     const res  = await api(`/api/emails/${id}`, { method: 'DELETE' });

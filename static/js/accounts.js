@@ -378,7 +378,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function deleteAccount(id) {
-  if (!confirm('Remover esta conta? Os e-mails serão mantidos.')) return;
+  if (!await customConfirm('Remover esta conta? Os e-mails serão mantidos.')) return;
   await api(`/api/accounts/${id}`, { method: 'DELETE' });
   if (state.selectedAccountId === id) state.selectedAccountId = null;
   await loadAccounts(); loadEmails(); toast('Conta removida', 'success');
@@ -386,7 +386,11 @@ async function deleteAccount(id) {
 
 async function purgeAccount(id) {
   const a = state.accounts.find(x => x.id === id);
-  if (!confirm(`Limpar "${a?.name}"? Remove conta E TODOS OS E-MAILS permanentemente.`)) return;
+  const ok = await customConfirm(
+    `Limpar "${a?.name}"? Remove conta E TODOS OS E-MAILS permanentemente.`,
+    { checkboxLabel: 'Sim, tenho certeza — não tem como desfazer', danger: true, okLabel: 'Limpar tudo' }
+  );
+  if (!ok) return;
   await api(`/api/accounts/${id}/purge`, { method: 'DELETE' });
   if (state.selectedAccountId === id) { state.selectedAccountId = null; hideEmail(); }
   await loadAccounts(); loadEmails(); toast('Conta e e-mails removidos', 'success');

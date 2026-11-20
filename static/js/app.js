@@ -173,6 +173,54 @@ function _sendBrowserNotif(subject, from, accountEmail) {
   });
 }
 
+// ── Confirm modal (substitui confirm()/prompt() do navegador) ────────────────
+// Pedido do usuário: nada de modal nativo do navegador. E pra "apagar todos"
+// fora de Lixeira/Spam, um checkbox de "sim, tenho certeza" já basta —
+// não precisa mais digitar o e-mail da conta num textbox.
+
+let _confirmResolve = null;
+
+function customConfirm(message, opts = {}) {
+  return new Promise(resolve => {
+    _confirmResolve = resolve;
+
+    document.getElementById('confirm-message').textContent = message;
+
+    const checkboxWrap = document.getElementById('confirm-checkbox-wrap');
+    const checkbox      = document.getElementById('confirm-checkbox');
+    const okBtn          = document.getElementById('confirm-ok-btn');
+    const cancelBtn      = document.getElementById('confirm-cancel-btn');
+
+    checkbox.checked = false;
+    if (opts.checkboxLabel) {
+      checkboxWrap.style.display = 'flex';
+      document.getElementById('confirm-checkbox-label').textContent = opts.checkboxLabel;
+      okBtn.disabled = true;
+      checkbox.onchange = () => { okBtn.disabled = !checkbox.checked; };
+    } else {
+      checkboxWrap.style.display = 'none';
+      okBtn.disabled = false;
+      checkbox.onchange = null;
+    }
+
+    okBtn.textContent = opts.okLabel || 'Confirmar';
+    okBtn.className   = 'btn ' + (opts.danger ? 'btn-danger' : 'btn-primary');
+    cancelBtn.textContent = opts.cancelLabel || 'Cancelar';
+
+    document.getElementById('confirm-modal').classList.add('open');
+    setTimeout(() => (opts.checkboxLabel ? checkbox : okBtn).focus(), 30);
+  });
+}
+
+function _resolveConfirm(value) {
+  const okBtn = document.getElementById('confirm-ok-btn');
+  if (value && okBtn.disabled) return;   // checkbox obrigatório ainda não marcado
+  document.getElementById('confirm-modal').classList.remove('open');
+  const resolve = _confirmResolve;
+  _confirmResolve = null;
+  if (resolve) resolve(value);
+}
+
 // ── Atalhos de teclado ────────────────────────────────────────────────────────
 
 let _gChordPending = false, _gChordTimer = null;
@@ -184,6 +232,10 @@ document.addEventListener('keydown', e => {
 
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && composeOpen) {
     e.preventDefault(); sendEmail(); return;
+  }
+  if (document.getElementById('confirm-modal').classList.contains('open')) {
+    if (e.key === 'Escape') { _resolveConfirm(false); return; }
+    if (e.key === 'Enter')  { e.preventDefault(); _resolveConfirm(true); return; }
   }
   if (e.key === 'Escape') {
     if (composeOpen && !document.getElementById('compose-modal').classList.contains('minimized')
@@ -237,6 +289,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('filters-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('filters-modal')) closeFiltersModal();
+  });
+  document.getElementById('confirm-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('confirm-modal')) _resolveConfirm(false);
   });
   document.getElementById('source-box').addEventListener('click', e => {
     if (e.target === document.getElementById('source-box')) closeSource();
