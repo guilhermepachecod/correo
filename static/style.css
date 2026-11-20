@@ -107,17 +107,25 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 #imap-search-btn { background:transparent; border:1px solid var(--line); border-radius:var(--radius); color:var(--muted); padding:4px 8px; cursor:pointer; font-size:11px; transition:all var(--trans); flex-shrink:0; }
 #imap-search-btn:hover { border-color:var(--accent2); color:var(--accent2); }
 #imap-search-btn.spinning { animation:spin .8s linear infinite; }
-#list-actions { padding:4px 10px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:4px; flex-shrink:0; flex-wrap:wrap; }
+/* Uma barra só (ver templates/index.html): #la-default-group e #bulk-bar
+   são dois grupos de botões dentro do MESMO #list-actions, nunca os dois
+   visíveis ao mesmo tempo — então a barra nunca aparece/desaparece nem
+   troca de altura, só o conteúdo de dentro troca. Fundo levemente
+   destacado (--bg3) pra marcar "isso é uma barra de ferramentas", igual
+   ao #ev-toolbar do painel de leitura — as únicas duas barras da
+   aplicação com esse tratamento. */
+#list-actions { padding:4px 10px; border-bottom:1px solid var(--line); background:var(--bg3); display:flex; align-items:center; min-height:26px; flex-shrink:0; }
+#la-default-group, #bulk-bar { display:flex; align-items:center; gap:4px; flex-wrap:wrap; width:100%; }
+#bulk-bar { display:none; }
+#list-actions.selecting #la-default-group { display:none; }
+#list-actions.selecting #bulk-bar { display:flex; }
 .la-btn { background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 7px; cursor:pointer; transition:all var(--trans); white-space:nowrap; }
 .la-btn:hover { border-color:var(--accent); color:var(--accent); }
+.la-btn.read { border-color:color-mix(in srgb,var(--green) 40%,var(--line)); color:var(--green); background:color-mix(in srgb,var(--green) 8%,transparent); }
+.la-btn.read:hover { border-color:var(--green); background:color-mix(in srgb,var(--green) 16%,transparent); }
 .la-btn.danger { border-color:color-mix(in srgb,var(--red) 40%,var(--line)); color:var(--red); background:color-mix(in srgb,var(--red) 8%,transparent); }
 .la-btn.danger:hover { border-color:var(--red); background:color-mix(in srgb,var(--red) 16%,transparent); }
 .la-sep { width:1px; height:12px; background:var(--line); flex-shrink:0; }
-/* Altura fixa e sempre reservada (visibility, não display) — sem isso,
-   selecionar/desselecionar mensagens empurrava a lista inteira pra baixo
-   e pra cima a cada clique, ruim pra quem tá navegando. */
-#bulk-bar { visibility:hidden; min-height:26px; padding:4px 10px; background:color-mix(in srgb,var(--accent) 12%,var(--bg3)); border-bottom:1px solid var(--line); align-items:center; gap:4px; flex-shrink:0; flex-wrap:wrap; }
-#bulk-bar.active { visibility:visible; }
 #bulk-count { font-size:11px; color:var(--accent); font-weight:600; flex:1; }
 .bulk-btn { background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--muted); font-family:var(--font); font-size:11px; padding:2px 7px; cursor:pointer; transition:all var(--trans); white-space:nowrap; }
 .bulk-btn:hover { border-color:var(--accent); color:var(--accent); }
@@ -184,10 +192,18 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .reading-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:10px; color:var(--muted); }
 .reading-empty-icon { font-size:40px; opacity:.15; }
 #email-view { display:none; flex-direction:column; height:100%; min-height:0; }
-#ev-toolbar { padding:6px 14px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:4px; flex-shrink:0; flex-wrap:wrap; background:var(--bg2); }
+/* A outra das duas barras de ferramentas da aplicação (a outra é
+   #list-actions) — mesmo --bg3 pra marcar visualmente "isso é uma
+   barra", em vez do --bg2 (igual ao resto do painel) que tinha antes. */
+#ev-toolbar { padding:6px 14px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:4px; flex-shrink:0; flex-wrap:wrap; background:var(--bg3); }
 .ev-btn { background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--muted); padding:3px 9px; cursor:pointer; font-family:var(--font); font-size:11px; transition:all var(--trans); white-space:nowrap; }
 .ev-btn:hover        { border-color:var(--accent); color:var(--accent); }
-.ev-btn.danger:hover { border-color:var(--red); color:var(--red); }
+.ev-btn.unread { border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,transparent); }
+.ev-btn.unread:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 16%,transparent); }
+.ev-btn.spam { border-color:color-mix(in srgb,var(--amber) 45%,var(--line)); color:var(--amber); background:color-mix(in srgb,var(--amber) 8%,transparent); }
+.ev-btn.spam:hover { border-color:var(--amber); background:color-mix(in srgb,var(--amber) 16%,transparent); }
+.ev-btn.danger { border-color:color-mix(in srgb,var(--red) 40%,var(--line)); color:var(--red); background:color-mix(in srgb,var(--red) 8%,transparent); }
+.ev-btn.danger:hover { border-color:var(--red); background:color-mix(in srgb,var(--red) 16%,transparent); }
 .ev-btn.active-toggle { border-color:var(--accent); color:var(--accent); background:color-mix(in srgb,var(--accent) 12%,transparent); }
 .ev-sep { width:1px; height:14px; background:var(--line); flex-shrink:0; margin:0 2px; }
 #ev-header { padding:10px 16px 8px; border-bottom:1px solid var(--line); flex-shrink:0; background:var(--bg2); }

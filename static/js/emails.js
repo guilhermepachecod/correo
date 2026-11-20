@@ -371,11 +371,12 @@ function selectAll() {
 function deselectAll() { state.selectedIds.clear(); renderEmailList(); }
 
 function renderBulkBar() {
-  const bar = document.getElementById('bulk-bar');
-  const n   = state.selectedIds.size;
-  // visibility, não display: a barra sempre ocupa o mesmo espaço, então
-  // selecionar/desselecionar não empurra a lista pra baixo/cima.
-  bar.classList.toggle('active', n > 0);
+  const wrap = document.getElementById('list-actions');
+  const n    = state.selectedIds.size;
+  // #la-default-group e #bulk-bar vivem dentro da MESMA barra — troca só
+  // qual grupo de botões aparece, a barra em si nunca aparece/desaparece
+  // nem muda de altura (era isso que empurrava a lista pra baixo/cima).
+  wrap.classList.toggle('selecting', n > 0);
   if (n) document.getElementById('bulk-count').textContent = `${n} selecionado(s)`;
 }
 

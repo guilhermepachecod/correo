@@ -96,25 +96,30 @@
         <button id="sync-btn" onclick="syncCurrent()" title="Sincronizar pasta">↻</button>
       </div>
 
+      <!-- Uma barra só: mostra os botões padrão (Todos/Nenhum/Ler todos/
+           Apagar todos) ou, quando há seleção, os botões de ação por
+           mensagem (Lido/Spam/Excluir/...) — nunca as duas juntas, nunca
+           uma segunda barra aparecendo/desaparecendo por cima da lista. -->
       <div id="list-actions">
-        <button class="la-btn" onclick="selectAll()">☑ Todos</button>
-        <button class="la-btn" onclick="deselectAll()">☐ Nenhum</button>
-        <div class="la-sep"></div>
-        <button class="la-btn" onclick="bulkActionAll('mark_read')">✓ Ler todos</button>
-        <button class="la-btn danger" onclick="bulkActionAll('delete')">🗑 Apagar todos</button>
+        <div id="la-default-group">
+          <button class="la-btn" onclick="selectAll()">☑ Todos</button>
+          <button class="la-btn" onclick="deselectAll()">☐ Nenhum</button>
+          <div class="la-sep"></div>
+          <button class="la-btn read" onclick="bulkActionAll('mark_read')">✓ Ler todos</button>
+          <button class="la-btn danger" onclick="bulkActionAll('delete')">🗑 Apagar todos</button>
+        </div>
+        <div id="bulk-bar">
+          <span id="bulk-count"></span>
+          <button class="bulk-btn read" onclick="bulkAction('mark_read')">✓ Lido</button>
+          <button class="bulk-btn unread" onclick="bulkAction('mark_unread')">✉ Não lido</button>
+          <button class="bulk-btn spam" onclick="bulkAction('mark_spam')">⚠ Spam</button>
+          <button class="bulk-btn notspam" onclick="bulkAction('mark_not_spam')">✓ Não spam</button>
+          <button class="bulk-btn danger" onclick="bulkAction('delete')">🗑 Excluir</button>
+          <button class="bulk-btn" onclick="deselectAll()" style="margin-left:auto">✕ Cancelar</button>
+        </div>
       </div>
 
       <div id="email-count-bar" style="padding:2px 10px;font-size:10px;color:var(--muted);background:var(--bg3);border-bottom:1px solid var(--line);min-height:18px;"></div>
-
-      <div id="bulk-bar">
-        <span id="bulk-count"></span>
-        <button class="bulk-btn read" onclick="bulkAction('mark_read')">✓ Lido</button>
-        <button class="bulk-btn unread" onclick="bulkAction('mark_unread')">✉ Não lido</button>
-        <button class="bulk-btn spam" onclick="bulkAction('mark_spam')">⚠ Spam</button>
-        <button class="bulk-btn notspam" onclick="bulkAction('mark_not_spam')">✓ Não spam</button>
-        <button class="bulk-btn danger" onclick="bulkAction('delete')">🗑 Excluir</button>
-        <button class="bulk-btn" onclick="deselectAll()" style="margin-left:auto">✕ Cancelar</button>
-      </div>
 
       <div id="email-list-header">
         <div class="elh-col" style="cursor:default"></div>
@@ -156,8 +161,8 @@
           <button class="ev-btn" onclick="viewSource()">⌁ Código-fonte</button>
           <div class="ev-sep"></div>
           <button class="ev-btn" id="ev-star-btn" onclick="toggleStar()">☆ Marcar</button>
-          <button class="ev-btn" onclick="markUnread()">✉ Não lido</button>
-          <button class="ev-btn" id="ev-spam-btn" onclick="toggleSpam()">⚠ Spam</button>
+          <button class="ev-btn unread" onclick="markUnread()">✉ Não lido</button>
+          <button class="ev-btn spam" id="ev-spam-btn" onclick="toggleSpam()">⚠ Spam</button>
           <button class="ev-btn danger" onclick="deleteEmail()">🗑 Excluir</button>
           <button class="ev-btn" id="ev-thread-btn" onclick="">💬 Conversa</button>
           <div class="ev-sep"></div>
