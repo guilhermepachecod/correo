@@ -56,11 +56,13 @@ function matchFolderDef(folderName) {
 }
 
 // Badge de cada pasta mostra o total de mensagens sempre (cinza) e, quando
-// tem não lida, um segundo badge destacado com esse número ao lado.
-function _folderBadgesHtml(total, unread) {
+// tem não lida, um segundo badge destacado com esse número ao lado — exceto
+// na Lixeira, onde não lida não diz muita coisa (mensagem já foi excluída,
+// só interessa quantas tem lá no total).
+function _folderBadgesHtml(total, unread, role) {
   if (!total) return '';
   let html = `<span class="folder-badge">${total}</span>`;
-  if (unread > 0) html += `<span class="folder-badge-unread">${unread}</span>`;
+  if (unread > 0 && role !== 'trash') html += `<span class="folder-badge-unread">${unread}</span>`;
   return html;
 }
 
@@ -230,7 +232,7 @@ function renderAccountTree() {
       folderEl.innerHTML = `
         <span class="folder-icon">${def.icon}</span>
         <span class="folder-name">${def.label}</span>
-        ${_folderBadgesHtml(totalC, unreadC)}
+        ${_folderBadgesHtml(totalC, unreadC, def.key)}
       `;
       folderEl.onclick = () => selectFolder(acc.id, def.key, realList);
       foldersDiv.appendChild(folderEl);
@@ -246,7 +248,7 @@ function renderAccountTree() {
       folderEl.innerHTML = `
         <span class="folder-icon">📁</span>
         <span class="folder-name">${esc(real)}</span>
-        ${_folderBadgesHtml(c.total, c.unread)}
+        ${_folderBadgesHtml(c.total, c.unread, c.role)}
       `;
       folderEl.onclick = () => selectFolder(acc.id, real, [real]);
       foldersDiv.appendChild(folderEl);
